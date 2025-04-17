@@ -1,0 +1,9 @@
+images
+*.png
+*.exr
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+**/__pycache__
