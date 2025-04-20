@@ -61,7 +61,7 @@ python run_relight.py transport load --input transport_matrix.npy
 ### Random Light Dataset Generation
 
 ```bash
-python run_relight.py dataset generate --start-index 0 --n-images 100 --random-sphere --use-gpu
+python run_relight.py dataset generate --start-index 0 --n-images 100 --use-gpu
 ```
 
 ### Example Scripts
@@ -75,7 +75,7 @@ python examples/use_transport_matrix.py --input transport_matrix.npy --target-im
 
 #### Generating Random Light Dataset
 ```bash
-python examples/generate_random_lights.py --start-index 0 --n-images 10 --random-sphere --use-gpu
+python examples/generate_random_lights.py --start-index 0 --n-images 10 --use-gpu
 ```
 
 ## GPU Rendering
@@ -88,7 +88,7 @@ Example commands with GPU rendering:
 python run_relight.py transport generate --proj-resx 64 --proj-resy 64 --batch-size 100 --use-gpu
 
 # Generate random light images with GPU rendering
-python run_relight.py dataset generate --start-index 0 --n-images 100 --random-sphere --use-gpu
+python run_relight.py dataset generate --start-index 0 --n-images 100 --use-gpu
 ```
 
 ## License

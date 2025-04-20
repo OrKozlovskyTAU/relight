@@ -17,7 +17,6 @@ def parse_args():
     
     parser.add_argument("--start-index", type=int, default=0, help="Starting index for the dataset")
     parser.add_argument("--n-images", type=int, default=100, help="Number of images to generate")
-    parser.add_argument("--random-sphere", action="store_true", help="Randomly position a sphere in the scene")
     parser.add_argument("--no-gpu", action="store_true", help="Don't use GPU rendering")
     parser.add_argument("--no-progress", action="store_true", help="Don't show progress")
     
@@ -32,7 +31,6 @@ def main():
     generate_random_light_dataset(
         start_index=args.start_index,
         n_images=args.n_images,
-        random_sphere=args.random_sphere,
         use_gpu=not args.no_gpu,
         show_progress=not args.no_progress
     )

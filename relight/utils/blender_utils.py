@@ -52,10 +52,6 @@ def set_default_scene():
     render_diffcol_png_node.base_path = str(Path(bpy.path.abspath("//"), "images"))
     render_diffcol_png_node.file_slots[0].path = "diffcol"
     
-    sphere = bpy.data.objects["sphere"]
-    sphere.hide_render = False
-    sphere.hide_viewport = False
-    clean_modifiers(sphere)
     clean_nodegroups()
 
 
