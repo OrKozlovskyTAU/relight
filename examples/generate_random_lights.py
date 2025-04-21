@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument("--no-gpu", action="store_true", help="Don't use GPU rendering")
     parser.add_argument("--no-progress", action="store_true", help="Don't show progress bar")
     parser.add_argument("--output-dir", type=str, help="Output directory for the generated images")
+    parser.add_argument("--grid-mode", action="store_true", help="Use a 3D grid inside the Cornell box instead of random positions")
     return parser.parse_args(argv)
 
 
@@ -47,15 +48,16 @@ def main():
             if hasattr(node, "base_path"):
                 node.base_path = str(output_dir)
     
-    # Generate the random light dataset
+    # Generate the light dataset
     generate_random_light_dataset(
         start_index=args.start_index,
         n_images=args.n_images,
         use_gpu=not args.no_gpu,
-        show_progress=not args.no_progress
+        show_progress=not args.no_progress,
+        grid_mode=args.grid_mode
     )
     
-    print(f"Generated {args.n_images} random light images starting from index {args.start_index}")
+    print(f"Generated {args.n_images} light images starting from index {args.start_index}")
 
 
 if __name__ == "__main__":
