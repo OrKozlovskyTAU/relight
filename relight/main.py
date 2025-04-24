@@ -8,7 +8,15 @@ This script provides a command-line interface for the Relight project.
 import argparse
 import bpy
 import sys
+import os
 from pathlib import Path
+
+
+# Add the conda environment path
+site_packages = os.path.join('/home/dcor/orkozlovsky/miniconda3/envs/relight_blender/', 'lib', 'python3.10', 'site-packages')
+if os.path.exists(site_packages):
+    print(f"Adding {site_packages} to sys.path")
+    sys.path.append(site_packages)
 
 # Add the project root to the Python path
 project_root = Path(__file__).parent.parent

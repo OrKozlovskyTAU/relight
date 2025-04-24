@@ -6,6 +6,7 @@ This script demonstrates how to generate a dataset of random light positions in 
 """
 
 import bpy
+import os
 import argparse
 from pathlib import Path
 
@@ -13,6 +14,13 @@ from pathlib import Path
 import sys
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
+
+# Add the conda environment path
+site_packages = os.path.join('/home/dcor/orkozlovsky/miniconda3/envs/relight_blender/', 'lib', 'python3.10', 'site-packages')
+if os.path.exists(site_packages):
+    print(f"Adding {site_packages} to sys.path")
+    sys.path.append(site_packages)
+
 
 from relight.core.random_light_dataset import generate_random_light_dataset
 
