@@ -41,6 +41,7 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.testing_utils import backend_empty_cache
 from diffusers.utils.torch_utils import is_compiled_module
 from relight.cli.train import parse_args
+from relight.utils.training_utils import unwrap_model, save_model_card, get_sigmas, setup_accelerator, setup_logging, create_output_dir, save_checkpoint, validate_training_args, create_model_hooks, compute_text_embeddings, encode_prompt, _encode_prompt_with_clip, _encode_prompt_with_t5, load_models_and_tokenizers
 
 
 if is_wandb_available():
@@ -56,7 +57,7 @@ def log_validation(controlnet, args, accelerator, weight_dtype, step, is_final_v
     logger.info("Running validation... ")
 
     if not is_final_validation:
-        controlnet = accelerator.unwrap_model(controlnet)
+        controlnet = unwrap_model(accelerator, controlnet)
     else:
         controlnet = SD3ControlNetModel.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
 
@@ -228,51 +229,6 @@ def import_model_class_from_model_name_or_path(
         raise ValueError(f"{model_class} is not supported.")
 
 
-def save_model_card(repo_id: str, image_logs=None, base_model=str, repo_folder=None):
-    img_str = ""
-    if image_logs is not None:
-        img_str = "You can find some example images below.\n\n"
-        for i, log in enumerate(image_logs):
-            images = log["images"]
-            validation_prompt = log["validation_prompt"]
-            validation_image = log["validation_image"]
-            validation_image.save(os.path.join(repo_folder, "image_control.png"))
-            img_str += f"prompt: {validation_prompt}\n"
-            images = [validation_image] + images
-            make_image_grid(images, 1, len(images)).save(os.path.join(repo_folder, f"images_{i}.png"))
-            img_str += f"![images_{i})](./images_{i}.png)\n"
-
-    model_description = f"""
-# SD3 controlnet-{repo_id}
-
-These are controlnet weights trained on {base_model} with new type of conditioning.
-The weights were trained using [ControlNet](https://github.com/lllyasviel/ControlNet) with the [SD3 diffusers trainer](https://github.com/huggingface/diffusers/blob/main/examples/controlnet/README_sd3.md).
-{img_str}
-
-Please adhere to the licensing terms as described `[here](https://huggingface.co/stabilityai/stable-diffusion-3-medium/blob/main/LICENSE)`.
-"""
-    model_card = load_or_create_model_card(
-        repo_id_or_path=repo_id,
-        from_training=True,
-        license="openrail++",
-        base_model=base_model,
-        model_description=model_description,
-        inference=True,
-    )
-
-    tags = [
-        "text-to-image",
-        "diffusers-training",
-        "diffusers",
-        "sd3",
-        "sd3-diffusers",
-        "controlnet",
-    ]
-    model_card = populate_model_card(model_card, tags=tags)
-
-    model_card.save(os.path.join(repo_folder, "README.md"))
-
-
 def make_train_dataset(args, tokenizer_one, tokenizer_two, tokenizer_three, accelerator):
     # Get the datasets: you can either provide your own training and evaluation files (see below)
     # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
@@ -404,366 +360,41 @@ def collate_fn(examples):
     }
 
 
-# Copied from dreambooth sd3 example
-def _encode_prompt_with_t5(
-    text_encoder,
-    tokenizer,
-    max_sequence_length,
-    prompt=None,
-    num_images_per_prompt=1,
-    device=None,
-):
-    prompt = [prompt] if isinstance(prompt, str) else prompt
-    batch_size = len(prompt)
-
-    text_inputs = tokenizer(
-        prompt,
-        padding="max_length",
-        max_length=max_sequence_length,
-        truncation=True,
-        add_special_tokens=True,
-        return_tensors="pt",
-    )
-    text_input_ids = text_inputs.input_ids
-    prompt_embeds = text_encoder(text_input_ids.to(device))[0]
-
-    dtype = text_encoder.dtype
-    prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
-
-    _, seq_len, _ = prompt_embeds.shape
-
-    # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
-    prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
-
-    return prompt_embeds
-
-
-# Copied from dreambooth sd3 example
-def _encode_prompt_with_clip(
-    text_encoder,
-    tokenizer,
-    prompt: str,
-    device=None,
-    num_images_per_prompt: int = 1,
-):
-    prompt = [prompt] if isinstance(prompt, str) else prompt
-    batch_size = len(prompt)
-
-    text_inputs = tokenizer(
-        prompt,
-        padding="max_length",
-        max_length=77,
-        truncation=True,
-        return_tensors="pt",
-    )
-
-    text_input_ids = text_inputs.input_ids
-    prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
-
-    pooled_prompt_embeds = prompt_embeds[0]
-    prompt_embeds = prompt_embeds.hidden_states[-2]
-    prompt_embeds = prompt_embeds.to(dtype=text_encoder.dtype, device=device)
-
-    _, seq_len, _ = prompt_embeds.shape
-    # duplicate text embeddings for each generation per prompt, using mps friendly method
-    prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
-
-    return prompt_embeds, pooled_prompt_embeds
-
-
-# Copied from dreambooth sd3 example
-def encode_prompt(
-    text_encoders,
-    tokenizers,
-    prompt: str,
-    max_sequence_length,
-    device=None,
-    num_images_per_prompt: int = 1,
-):
-    prompt = [prompt] if isinstance(prompt, str) else prompt
-
-    clip_tokenizers = tokenizers[:2]
-    clip_text_encoders = text_encoders[:2]
-
-    clip_prompt_embeds_list = []
-    clip_pooled_prompt_embeds_list = []
-    for tokenizer, text_encoder in zip(clip_tokenizers, clip_text_encoders):
-        prompt_embeds, pooled_prompt_embeds = _encode_prompt_with_clip(
-            text_encoder=text_encoder,
-            tokenizer=tokenizer,
-            prompt=prompt,
-            device=device if device is not None else text_encoder.device,
-            num_images_per_prompt=num_images_per_prompt,
-        )
-        clip_prompt_embeds_list.append(prompt_embeds)
-        clip_pooled_prompt_embeds_list.append(pooled_prompt_embeds)
-
-    clip_prompt_embeds = torch.cat(clip_prompt_embeds_list, dim=-1)
-    pooled_prompt_embeds = torch.cat(clip_pooled_prompt_embeds_list, dim=-1)
-
-    t5_prompt_embed = _encode_prompt_with_t5(
-        text_encoders[-1],
-        tokenizers[-1],
-        max_sequence_length,
-        prompt=prompt,
-        num_images_per_prompt=num_images_per_prompt,
-        device=device if device is not None else text_encoders[-1].device,
-    )
-
-    clip_prompt_embeds = torch.nn.functional.pad(
-        clip_prompt_embeds, (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1])
-    )
-    prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
-
-    return prompt_embeds, pooled_prompt_embeds
-
-
 def main(args):
-    if args.report_to == "wandb" and args.hub_token is not None:
-        raise ValueError(
-            "You cannot use both --report_to=wandb and --hub_token due to a security risk of exposing your token."
-            " Please use `huggingface-cli login` to authenticate with the Hub."
-        )
+    # Validate training arguments
+    validate_training_args(args)
+    
+    # Set up accelerator
+    accelerator = setup_accelerator(args)
+    
+    # Set up logging
+    logger = setup_logging(accelerator, args)
+    
+    # Create output directory and handle repository creation
+    repo_id = create_output_dir(args, accelerator)
+    
+    # Load models and tokenizers
+    models, (noise_scheduler, noise_scheduler_copy) = load_models_and_tokenizers(args, logger, model_type="sd3")
+    vae, transformer, controlnet, text_encoders, tokenizers = models
+    text_encoder_one, text_encoder_two, text_encoder_three = text_encoders
+    tokenizer_one, tokenizer_two, tokenizer_three = tokenizers
+    
+    weight_dtype = setup_weight_dtype(args, accelerator)
 
-    if torch.backends.mps.is_available() and args.mixed_precision == "bf16":
-        # due to pytorch#99272, MPS does not yet support bfloat16.
-        raise ValueError(
-            "Mixed precision training with bfloat16 is not supported on MPS. Please use fp16 (recommended) or fp32 instead."
-        )
+    setup_training(args, accelerator, transformer, vae, text_encoders, tokenizers, controlnet, weight_dtype, model_type="sd3")
+    
+    # Create model hooks for saving and loading
+    create_model_hooks(accelerator, args, [controlnet], model_type="sd3")
 
-    logging_dir = Path(args.output_dir, args.logging_dir)
-
-    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
-    kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
-        project_config=accelerator_project_config,
-        kwargs_handlers=[kwargs],
-    )
-
-    # Disable AMP for MPS.
-    if torch.backends.mps.is_available():
-        accelerator.native_amp = False
-
-    if args.report_to == "wandb":
-        if not is_wandb_available():
-            raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
-
-    # Make one log on every process with the configuration for debugging.
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
-    )
-    logger.info(accelerator.state, main_process_only=False)
-    if accelerator.is_local_main_process:
-        transformers.utils.logging.set_verbosity_warning()
-        diffusers.utils.logging.set_verbosity_info()
-    else:
-        transformers.utils.logging.set_verbosity_error()
-        diffusers.utils.logging.set_verbosity_error()
-
-    # If passed along, set the training seed now.
-    if args.seed is not None:
-        set_seed(args.seed)
-
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
-
-    # Load the tokenizer
-    tokenizer_one = CLIPTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer",
-        revision=args.revision,
-    )
-    tokenizer_two = CLIPTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer_2",
-        revision=args.revision,
-    )
-    tokenizer_three = T5TokenizerFast.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer_3",
-        revision=args.revision,
-    )
-
-    # import correct text encoder class
-    text_encoder_cls_one = import_model_class_from_model_name_or_path(
-        args.pretrained_model_name_or_path, args.revision
-    )
-    text_encoder_cls_two = import_model_class_from_model_name_or_path(
-        args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_2"
-    )
-    text_encoder_cls_three = import_model_class_from_model_name_or_path(
-        args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_3"
-    )
-
-    # Load scheduler and models
-    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="scheduler"
-    )
-    noise_scheduler_copy = copy.deepcopy(noise_scheduler)
-    text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
-        text_encoder_cls_one, text_encoder_cls_two, text_encoder_cls_three
-    )
-    vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="vae",
-        revision=args.revision,
-        variant=args.variant,
-    )
-    transformer = SD3Transformer2DModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant
-    )
-
-    if args.controlnet_model_name_or_path:
-        logger.info("Loading existing controlnet weights")
-        controlnet = SD3ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
-    else:
-        logger.info("Initializing controlnet weights from transformer")
-        controlnet = SD3ControlNetModel.from_transformer(
-            transformer, num_extra_conditioning_channels=args.num_extra_conditioning_channels
-        )
-
-    transformer.requires_grad_(False)
-    vae.requires_grad_(False)
-    text_encoder_one.requires_grad_(False)
-    text_encoder_two.requires_grad_(False)
-    text_encoder_three.requires_grad_(False)
-    controlnet.train()
-
-    # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
-    def unwrap_model(model):
-        model = accelerator.unwrap_model(model)
-        model = model._orig_mod if is_compiled_module(model) else model
-        return model
-
-    # `accelerate` 0.16.0 will have better support for customized saving
-    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-        def save_model_hook(models, weights, output_dir):
-            if accelerator.is_main_process:
-                i = len(weights) - 1
-
-                while len(weights) > 0:
-                    weights.pop()
-                    model = models[i]
-
-                    sub_dir = "controlnet"
-                    model.save_pretrained(os.path.join(output_dir, sub_dir))
-
-                    i -= 1
-
-        def load_model_hook(models, input_dir):
-            while len(models) > 0:
-                # pop models so that they are not loaded again
-                model = models.pop()
-
-                # load diffusers style into model
-                load_model = SD3ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
-                model.register_to_config(**load_model.config)
-
-                model.load_state_dict(load_model.state_dict())
-                del load_model
-
-        accelerator.register_save_state_pre_hook(save_model_hook)
-        accelerator.register_load_state_pre_hook(load_model_hook)
-
-    if args.gradient_checkpointing:
-        controlnet.enable_gradient_checkpointing()
-
-    # Check that all trainable models are in full precision
-    low_precision_error_string = (
-        " Please make sure to always have all model weights in full float32 precision when starting training - even if"
-        " doing mixed precision training, copy of the weights should still be float32."
-    )
-
-    if unwrap_model(controlnet).dtype != torch.float32:
-        raise ValueError(
-            f"Controlnet loaded as datatype {unwrap_model(controlnet).dtype}. {low_precision_error_string}"
-        )
-
-    # Enable TF32 for faster training on Ampere GPUs,
-    # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
-    if args.allow_tf32:
-        torch.backends.cuda.matmul.allow_tf32 = True
-
-    if args.scale_lr:
-        args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
-        )
-
-    # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
-    if args.use_8bit_adam:
-        try:
-            import bitsandbytes as bnb
-        except ImportError:
-            raise ImportError(
-                "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
-            )
-
-        optimizer_class = bnb.optim.AdamW8bit
-    else:
-        optimizer_class = torch.optim.AdamW
-
-    # Optimizer creation
-    params_to_optimize = controlnet.parameters()
-    optimizer = optimizer_class(
-        params_to_optimize,
-        lr=args.learning_rate,
-        betas=(args.adam_beta1, args.adam_beta2),
-        weight_decay=args.adam_weight_decay,
-        eps=args.adam_epsilon,
-    )
-
-    # For mixed precision training we cast the text_encoder and vae weights to half-precision
-    # as these models are only used for inference, keeping weights in full precision is not required.
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-
-    # Move vae, transformer and text_encoder to device and cast to weight_dtype
-    if args.upcast_vae:
-        vae.to(accelerator.device, dtype=torch.float32)
-    else:
-        vae.to(accelerator.device, dtype=weight_dtype)
-    transformer.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_one.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_two.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_three.to(accelerator.device, dtype=weight_dtype)
+    optimizer = setup_optimizer(args, controlnet)
 
     train_dataset = make_train_dataset(args, tokenizer_one, tokenizer_two, tokenizer_three, accelerator)
-
-    tokenizers = [tokenizer_one, tokenizer_two, tokenizer_three]
-    text_encoders = [text_encoder_one, text_encoder_two, text_encoder_three]
-
-    def compute_text_embeddings(batch, text_encoders, tokenizers):
-        with torch.no_grad():
-            prompt = batch["prompts"]
-            prompt_embeds, pooled_prompt_embeds = encode_prompt(
-                text_encoders, tokenizers, prompt, args.max_sequence_length
-            )
-            prompt_embeds = prompt_embeds.to(accelerator.device)
-            pooled_prompt_embeds = pooled_prompt_embeds.to(accelerator.device)
-        return {"prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled_prompt_embeds}
 
     compute_embeddings_fn = functools.partial(
         compute_text_embeddings,
         text_encoders=text_encoders,
         tokenizers=tokenizers,
+        device=accelerator.device
     )
     with accelerator.main_process_first():
         from datasets.fingerprint import Hasher
@@ -879,15 +510,7 @@ def main(args):
     )
 
     def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
-        sigmas = noise_scheduler_copy.sigmas.to(device=accelerator.device, dtype=dtype)
-        schedule_timesteps = noise_scheduler_copy.timesteps.to(accelerator.device)
-        timesteps = timesteps.to(accelerator.device)
-        step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
-
-        sigma = sigmas[step_indices].flatten()
-        while len(sigma.shape) < n_dim:
-            sigma = sigma.unsqueeze(-1)
-        return sigma
+        return get_sigmas(timesteps, noise_scheduler_copy, n_dim=n_dim, dtype=dtype, device=accelerator.device)
 
     image_logs = None
     for epoch in range(first_epoch, args.num_train_epochs):

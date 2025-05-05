@@ -20,6 +20,10 @@ from huggingface_hub import create_repo
 from accelerate import DistributedDataParallelKwargs, ProjectConfiguration
 import transformers
 import diffusers
+import accelerate
+from transformers import AutoTokenizer, CLIPTextModel, T5EncoderModel
+import copy
+from packaging import version
 
 logger = get_logger(__name__)
 
@@ -112,6 +116,46 @@ def setup_accelerator(args):
         
     return accelerator
 
+def setup_optimizer(args, controlnet):
+    """Set up the optimizer for training."""
+        # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
+    if args.use_8bit_adam:
+        try:
+            import bitsandbytes as bnb
+        except ImportError:
+            raise ImportError(
+                "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
+            )
+
+        optimizer_class = bnb.optim.AdamW8bit
+    else:
+        optimizer_class = torch.optim.AdamW
+
+    # Optimizer creation
+    params_to_optimize = controlnet.parameters()
+    # use adafactor optimizer to save gpu memory
+    if args.use_adafactor:
+        from transformers import Adafactor
+
+        optimizer = Adafactor(
+            params_to_optimize,
+            lr=args.learning_rate,
+            scale_parameter=False,
+            relative_step=False,
+            # warmup_init=True,
+            weight_decay=args.adam_weight_decay,
+        )
+    else:
+        optimizer = optimizer_class(
+            params_to_optimize,
+            lr=args.learning_rate,
+            betas=(args.adam_beta1, args.adam_beta2),
+            weight_decay=args.adam_weight_decay,
+            eps=args.adam_epsilon,
+        )
+    
+    return optimizer
+
 def setup_logging(accelerator, args):
     """Set up logging for training."""
     logging.basicConfig(
@@ -194,37 +238,7 @@ def validate_training_args(args):
     
     return True
 
-def create_model_hooks(accelerator, args, models, optimizer, lr_scheduler):
-    """Create model hooks for saving and loading checkpoints."""
-    def save_model_hook(models, weights, output_dir):
-        if accelerator.is_main_process:
-            for model in models:
-                unwrapped_model = unwrap_model(model)
-                unwrapped_model.save_pretrained(
-                    output_dir,
-                    is_main_process=accelerator.is_main_process,
-                    save_function=accelerator.save,
-                    state_dict=accelerator.get_state_dict(model),
-                )
-                if hasattr(unwrapped_model, "save_config"):
-                    unwrapped_model.save_config(output_dir)
-    
-    def load_model_hook(models, input_dir):
-        for i, model in enumerate(models):
-            unwrapped_model = unwrap_model(model)
-            unwrapped_model.load_pretrained(
-                input_dir,
-                is_main_process=accelerator.is_main_process,
-                load_function=accelerator.load,
-            )
-    
-    # Register hooks
-    accelerator.register_save_state_pre_hook(save_model_hook)
-    accelerator.register_load_state_pre_hook(load_model_hook)
-    
-    return save_model_hook, load_model_hook
-
-def compute_text_embeddings(batch, text_encoders, tokenizers, proportion_empty_prompts=0, is_train=True, max_sequence_length=77, return_dict=False):
+def compute_text_embeddings(batch, text_encoders, tokenizers, device, proportion_empty_prompts=0, max_sequence_length=77):
     """Compute text embeddings for a batch.
     
     Args:
@@ -244,33 +258,32 @@ def compute_text_embeddings(batch, text_encoders, tokenizers, proportion_empty_p
     prompt_key = "prompts" if "prompts" in batch else "prompt"
     prompt = batch[prompt_key]
     
-    prompt_embeds, pooled_embeds = encode_prompt(
-        text_encoders,
-        tokenizers,
-        prompt,
-        max_sequence_length=max_sequence_length,
-        device=text_encoders[0].device,
-        num_images_per_prompt=1,
-    )
-    
-    # Get the unconditional embeddings for classifier-free guidance
-    if proportion_empty_prompts > 0:
-        uncond_tokens = [""] * (batch[prompt_key].size(0) if isinstance(batch[prompt_key], torch.Tensor) else len(batch[prompt_key]))
-        uncond_embeds, _ = encode_prompt(
+    with torch.no_grad():
+        prompt_embeds, pooled_embeds = encode_prompt(
             text_encoders,
             tokenizers,
-            uncond_tokens,
+            prompt,
             max_sequence_length=max_sequence_length,
             device=text_encoders[0].device,
             num_images_per_prompt=1,
         )
+    
+    # Get the unconditional embeddings for classifier-free guidance
+    if proportion_empty_prompts > 0:
+        uncond_tokens = [""] * (batch[prompt_key].size(0) if isinstance(batch[prompt_key], torch.Tensor) else len(batch[prompt_key]))
+        with torch.no_grad():
+            uncond_embeds, _ = encode_prompt(
+                text_encoders,
+                tokenizers,
+                uncond_tokens,
+                max_sequence_length=max_sequence_length,
+                device=text_encoders[0].device,
+                num_images_per_prompt=1,
+            )
     else:
         uncond_embeds = None
     
-    if return_dict:
-        return {"prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled_embeds}
-    else:
-        return prompt_embeds, pooled_embeds, uncond_embeds
+    return {"prompt_embeds": prompt_embeds.to(device), "pooled_prompt_embeds": pooled_embeds.to(device)}
 
 def encode_prompt(text_encoders, tokenizers, prompt, max_sequence_length, device=None, num_images_per_prompt=1):
     """Encode prompt using text encoders."""
@@ -334,3 +347,262 @@ def _encode_prompt_with_t5(text_encoder, tokenizer, prompt, max_sequence_length,
     prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
     
     return prompt_embeds 
+
+def load_models_and_tokenizers(args, logger, model_type="sd3"):
+    """
+    Load models and tokenizers for training.
+    
+    Args:
+        args: Training arguments
+        logger: Logger instance
+        model_type: Either "sd3" or "flux" to determine which models to load
+        
+    Returns:
+        Tuple of (models, schedulers) where models is a tuple of (vae, transformer, controlnet, text_encoders, tokenizers)
+        and schedulers is a tuple of (noise_scheduler, noise_scheduler_copy)
+    """
+    if model_type == "sd3":
+        # Load the tokenizers
+        tokenizer_one = CLIPTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer",
+            revision=args.revision,
+        )
+        tokenizer_two = CLIPTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer_2",
+            revision=args.revision,
+        )
+        tokenizer_three = T5TokenizerFast.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer_3",
+            revision=args.revision,
+        )
+        tokenizers = [tokenizer_one, tokenizer_two, tokenizer_three]
+
+        # import correct text encoder class
+        text_encoder_cls_one = import_model_class_from_model_name_or_path(
+            args.pretrained_model_name_or_path, args.revision
+        )
+        text_encoder_cls_two = import_model_class_from_model_name_or_path(
+            args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_2"
+        )
+        text_encoder_cls_three = import_model_class_from_model_name_or_path(
+            args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_3"
+        )
+
+        # Load scheduler and models
+        noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="scheduler"
+        )
+        noise_scheduler_copy = copy.deepcopy(noise_scheduler)
+        text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
+            text_encoder_cls_one, text_encoder_cls_two, text_encoder_cls_three
+        )
+        text_encoders = [text_encoder_one, text_encoder_two, text_encoder_three]
+        
+        vae = AutoencoderKL.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="vae",
+            revision=args.revision,
+            variant=args.variant,
+        )
+        transformer = SD3Transformer2DModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant
+        )
+
+        if args.controlnet_model_name_or_path:
+            logger.info("Loading existing controlnet weights")
+            controlnet = SD3ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
+        else:
+            logger.info("Initializing controlnet weights from transformer")
+            controlnet = SD3ControlNetModel.from_transformer(
+                transformer, num_extra_conditioning_channels=args.num_extra_conditioning_channels
+            )
+    else:  # flux
+        # Load the tokenizer
+        tokenizer_one = AutoTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer",
+            revision=args.revision,
+        )
+        # load t5 tokenizer
+        tokenizer_two = AutoTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer_2",
+            revision=args.revision,
+        )
+        tokenizers = [tokenizer_one, tokenizer_two]
+
+        # load clip text encoder
+        text_encoder_one = CLIPTextModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+        )
+        # load t5 text encoder
+        text_encoder_two = T5EncoderModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
+        )
+        text_encoders = [text_encoder_one, text_encoder_two]
+
+        vae = AutoencoderKL.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="vae",
+            revision=args.revision,
+            variant=args.variant,
+        )
+        transformer = FluxTransformer2DModel.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="transformer",
+            revision=args.revision,
+            variant=args.variant,
+        )
+        if args.controlnet_model_name_or_path:
+            logger.info("Loading existing controlnet weights")
+            controlnet = FluxControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
+        else:
+            logger.info("Initializing controlnet weights from transformer")
+            # we can define the num_layers, num_single_layers,
+            controlnet = FluxControlNetModel.from_transformer(
+                transformer,
+                attention_head_dim=transformer.config["attention_head_dim"],
+                num_attention_heads=transformer.config["num_attention_heads"],
+                num_layers=args.num_double_layers,
+                num_single_layers=args.num_single_layers,
+            )
+        logger.info("all models loaded successfully")
+
+        noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="scheduler",
+        )
+        noise_scheduler_copy = copy.deepcopy(noise_scheduler)
+
+    return (vae, transformer, controlnet, text_encoders, tokenizers), (noise_scheduler, noise_scheduler_copy)
+
+def create_model_hooks(accelerator, args, models, model_type="sd3"):
+    """
+    Create model hooks for saving and loading models.
+    
+    Args:
+        accelerator: The accelerator instance
+        args: Training arguments
+        models: List of models to save/load
+        model_type: Either "sd3" or "flux" to determine which model type to use
+        
+    Returns:
+        Tuple of (save_model_hook, load_model_hook) functions
+    """
+    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
+        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
+        def save_model_hook(models, weights, output_dir):
+            if accelerator.is_main_process:
+                i = len(weights) - 1
+
+                while len(weights) > 0:
+                    weights.pop()
+                    model = models[i]
+
+                    sub_dir = "controlnet" if model_type == "sd3" else "flux_controlnet"
+                    model.save_pretrained(os.path.join(output_dir, sub_dir))
+
+                    i -= 1
+
+        def load_model_hook(models, input_dir):
+            while len(models) > 0:
+                # pop models so that they are not loaded again
+                model = models.pop()
+
+                # load diffusers style into model
+                if model_type == "sd3":
+                    from diffusers import SD3ControlNetModel
+                    load_model = SD3ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
+                else:
+                    from diffusers.models.controlnets.controlnet_flux import FluxControlNetModel
+                    load_model = FluxControlNetModel.from_pretrained(input_dir, subfolder="flux_controlnet")
+                
+                model.register_to_config(**load_model.config)
+                model.load_state_dict(load_model.state_dict())
+                del load_model
+
+        accelerator.register_save_state_pre_hook(save_model_hook)
+        accelerator.register_load_state_pre_hook(load_model_hook)
+        
+        return save_model_hook, load_model_hook
+    
+    return None, None
+
+def setup_weight_dtype(args, accelerator):
+    """Set up the weight dtype for training."""
+    # For mixed precision training we cast the text_encoder and vae weights to half-precision
+    # as these models are only used for inference, keeping weights in full precision is not required.
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+    
+    return weight_dtype
+
+def setup_training(args, accelerator, transformer, vae, text_encoders, tokenizers, controlnet, weight_dtype, model_type="sd3"):
+    transformer.requires_grad_(False)
+    vae.requires_grad_(False)
+    for text_encoder in text_encoders:
+        text_encoder.requires_grad_(False)
+    controlnet.train()
+    
+    if model_type == "flux":
+        if args.enable_npu_flash_attention:
+            if is_torch_npu_available():
+                logger.info("npu flash attention enabled.")
+                transformer.enable_npu_flash_attention()
+            else:
+                raise ValueError("npu flash attention requires torch_npu extensions and is supported only on npu devices.")
+
+        if args.enable_xformers_memory_efficient_attention:
+            if is_xformers_available():
+                import xformers
+
+                xformers_version = version.parse(xformers.__version__)
+                if xformers_version == version.parse("0.0.16"):
+                    logger.warning(
+                        "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
+                    )
+                transformer.enable_xformers_memory_efficient_attention()
+                controlnet.enable_xformers_memory_efficient_attention()
+            else:
+                raise ValueError("xformers is not available. Make sure it is installed correctly")
+
+    if args.gradient_checkpointing:
+        if model_type == "flux":
+            transformer.enable_gradient_checkpointing()
+        controlnet.enable_gradient_checkpointing()
+    
+    # Check that all trainable models are in full precision
+    if unwrap_model(controlnet).dtype != torch.float32:
+        low_precision_error_string = (
+            " Please make sure to always have all model weights in full float32 precision when starting training - even if"
+            " doing mixed precision training, copy of the weights should still be float32."
+        )
+        raise ValueError(
+            f"Controlnet loaded as datatype {unwrap_model(controlnet).dtype}. {low_precision_error_string}"
+        )
+
+    # Enable TF32 for faster training on Ampere GPUs,
+    # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
+    if args.allow_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+
+    if args.scale_lr:
+        args.learning_rate = (
+            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+        )
+    
+    # Move vae, transformer and text_encoder to device and cast to weight_dtype
+    if args.upcast_vae:
+        vae.to(accelerator.device, dtype=torch.float32)
+    else:
+        vae.to(accelerator.device, dtype=weight_dtype)
+    transformer.to(accelerator.device, dtype=weight_dtype)
+    for text_encoder in text_encoders:
+        text_encoder.to(accelerator.device, dtype=weight_dtype)
+    
