@@ -498,8 +498,8 @@ def parse_args(input_args=None):
         "--model_type",
         type=str,
         default="sd3",
-        choices=["sd3", "flux"],
-        help="Type of ControlNet model to train: 'sd3' for standard ControlNet or 'flux' for Flux ControlNet.",
+        choices=["sd3", "flux", "sd"],
+        help="Type of ControlNet model to train: 'sd3' for standard ControlNet, 'flux' for Flux ControlNet, or 'sd' for ControlNet with null text embeddings.",
     )
 
     if input_args is not None:
@@ -559,6 +559,9 @@ def main():
     elif args.model_type == "flux":
         from relight.training.train_controlnet_flux import main as train_flux
         train_flux(args)
+    elif args.model_type == "sd":
+        from relight.training.train_controlnet import main as train_null_text
+        train_null_text(args)
     else:
         raise ValueError(f"Unknown model type: {args.model_type}")
 
