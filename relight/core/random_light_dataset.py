@@ -2,6 +2,8 @@ import bpy
 import numpy as np
 from mathutils import Vector
 import math
+import csv
+from pathlib import Path
 
 from relight.utils.blender_utils import (
     set_default_scene,
@@ -17,31 +19,6 @@ def inside_mesh(x, y, z, mesh):
     p2 = point - p
     v = p2.dot(normal)
     return not (v < 0.0)
-
-
-def get_object_bounds(obj):
-    """
-    Get the bounds of an object based on its dimensions and position.
-    
-    Args:
-        obj: The Blender object to get bounds for
-        
-    Returns:
-        tuple: (x_min, x_max, y_min, y_max, z_min, z_max)
-    """
-    # Get the object's dimensions and position
-    dimensions = obj.dimensions
-    location = obj.location
-    
-    # Calculate bounds
-    x_min = location.x - dimensions.x/2
-    x_max = location.x + dimensions.x/2
-    y_min = location.y - dimensions.y/2
-    y_max = location.y + dimensions.y/2
-    z_min = location.z - dimensions.z/2
-    z_max = location.z + dimensions.z/2
-    
-    return (x_min, x_max, y_min, y_max, z_min, z_max)
 
 
 def generate_grid_positions(x_range, y_range, z_range, grid_size):
@@ -75,7 +52,7 @@ def generate_grid_positions(x_range, y_range, z_range, grid_size):
     return positions
 
 
-def generate_random_light_dataset(start_index, n_images, use_gpu=True, show_progress=True, grid_mode=False):
+def generate_random_light_dataset(start_index, n_images, output_dir, use_gpu=True, show_progress=True, grid_mode=False):
     """
     Generate a dataset of light positions in the scene.
     
@@ -100,6 +77,7 @@ def generate_random_light_dataset(start_index, n_images, use_gpu=True, show_prog
     bpy.data.objects["Point"].hide_viewport = False
     
     # Get scene objects
+    cornell_box = bpy.data.objects["cornell_box"]
     large_box = bpy.data.objects["large_box"]
     small_box = bpy.data.objects["small_box"]
     
@@ -111,18 +89,12 @@ def generate_random_light_dataset(start_index, n_images, use_gpu=True, show_prog
     render_diffindir_png_node = bpy.data.scenes["Scene"].node_tree.nodes[
         "render_diffindir_png"
     ]
-
-    # Get bounds from the Cornell box (large_box)
-    x_min, x_max, y_min, y_max, z_min, z_max = get_object_bounds(large_box)
-    
-    # Extend the bounds to include positions in front of the box
-    # Add extra space in front of the box (y direction)
-    y_max_extended = y_max + 0.5
-    
+   
+    eps = 0.001
     # Define bounds for positioning based on the actual box dimensions
-    x_range = [x_min, x_max]
-    y_range = [y_min, y_max_extended]  # Extended to include positions in front of the box
-    z_range = [z_min, z_max]
+    x_range = [-0.25 + eps, 0.25 - eps]
+    y_range = [-0.25 + eps, 0.4 - eps]
+    z_range = [-0.25 + eps, 0.25 - eps]
     
     if show_progress:
         print(f"Using bounds: x={x_range}, y={y_range}, z={z_range}")
@@ -153,6 +125,12 @@ def generate_random_light_dataset(start_index, n_images, use_gpu=True, show_prog
     else:
         positions = None  # Will generate random positions in the loop
     
+    # Create CSV file for light positions
+    csv_path = output_dir / "light_positions.csv"
+    with open(csv_path, 'w', newline='') as csvfile:
+        csv_writer = csv.writer(csvfile)
+        csv_writer.writerow(['index', 'x', 'y', 'z'])
+    
     count = start_index
     
     if show_progress:
@@ -175,6 +153,11 @@ def generate_random_light_dataset(start_index, n_images, use_gpu=True, show_prog
         
         bpy.data.objects["Point"].location = (x, y, z)
         
+        # Write light position to CSV
+        with open(csv_path, 'a', newline='') as csvfile:
+            csv_writer = csv.writer(csvfile)
+            csv_writer.writerow([count, x, y, z])
+        
         # Set up file paths
         render_png_node.file_slots[0].path = f"{count:05d}_render_"
         render_diffdir_png_node.file_slots[0].path = f"{count:05d}_diffdir_"
@@ -193,4 +176,5 @@ def generate_random_light_dataset(start_index, n_images, use_gpu=True, show_prog
     set_default_scene()
     
     if show_progress:
-        print("Light dataset generation complete.") 
+        print("Light dataset generation complete.")
+        print(f"Light positions saved to {csv_path}") 

@@ -7,3 +7,4 @@ images
 *.bmp
 *.tiff
 **/__pycache__
+output/light_positions.csv

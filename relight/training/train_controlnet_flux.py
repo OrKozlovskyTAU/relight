@@ -9,26 +9,19 @@ import shutil
 from contextlib import nullcontext
 from pathlib import Path
 
-import accelerate
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-import transformers
-from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
+from accelerate.utils import DistributedType
 from datasets import load_dataset
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import (
-    AutoTokenizer,
-    CLIPTextModel,
-    T5EncoderModel,
-)
+
 
 import diffusers
 from diffusers import (
@@ -45,7 +38,7 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 from relight.cli.train import parse_args
-from relight.utils.training_utils import unwrap_model, save_model_card, get_sigmas, setup_accelerator, setup_logging, create_output_dir, save_checkpoint, validate_training_args, create_model_hooks, compute_text_embeddings, encode_prompt, _encode_prompt_with_clip, _encode_prompt_with_t5, load_models_and_tokenizers
+from relight.utils.training_utils import unwrap_model, save_model_card, get_sigmas, setup_accelerator, setup_logging, create_output_dir, save_checkpoint, validate_training_args, create_model_hooks, load_models
 
 if is_wandb_available():
     import wandb
@@ -313,15 +306,14 @@ def main(args):
     # Create output directory and handle repository creation
     repo_id = create_output_dir(args, accelerator)
     
-    # Load models and tokenizers
-    models, (noise_scheduler, noise_scheduler_copy) = load_models_and_tokenizers(args, logger, model_type="flux")
-    vae, transformer, controlnet, text_encoders, tokenizers = models
-    text_encoder_one, text_encoder_two = text_encoders
-    tokenizer_one, tokenizer_two = tokenizers
+    # Load models
+    models, (noise_scheduler, noise_scheduler_copy) = load_models(args, logger, model_type="flux")
+    vae, transformer, controlnet = models
 
     weight_dtype = setup_weight_dtype(args, accelerator)
 
-    setup_training(args, accelerator, transformer, vae, text_encoders, tokenizers, controlnet, weight_dtype, model_type="sd3")
+    # Setup training
+    setup_training(args, accelerator, transformer, vae, controlnet, weight_dtype, model_type="flux")
 
     # Create model hooks for saving and loading
     create_model_hooks(accelerator, args, [controlnet], model_type="flux")
@@ -653,21 +645,6 @@ def main(args):
                 weight_dtype=weight_dtype,
                 step=global_step,
                 is_final_validation=True,
-            )
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                image_logs=image_logs,
-                base_model=args.pretrained_model_name_or_path,
-                repo_folder=args.output_dir,
-            )
-
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
             )
 
     accelerator.end_training()

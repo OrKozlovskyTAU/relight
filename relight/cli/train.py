@@ -325,7 +325,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--report_to",
         type=str,
-        default="tensorboard",
+        default="wandb",
         help=(
             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`,'
             ' `"wandb"` and `"comet_ml"`. If `"none"` is passed, no integrations will be used.'
@@ -336,28 +336,6 @@ def parse_args(input_args=None):
         type=int,
         default=-1,
         help="Used for distributed training.",
-    )
-    parser.add_argument(
-        "--push_to_hub",
-        action="store_true",
-        help="Whether or not to push the model to the Hub.",
-    )
-    parser.add_argument(
-        "--hub_token",
-        type=str,
-        default=None,
-        help="The token to use to push to the Model Hub.",
-    )
-    parser.add_argument(
-        "--hub_model_id",
-        type=str,
-        default=None,
-        help="The name of the repository to keep in sync with the `local_` output dir.",
-    )
-    parser.add_argument(
-        "--hub_private",
-        action="store_true",
-        help="Whether or not to create a private model hub.",
     )
     
     # Additional arguments from train_controlnet.py
@@ -516,6 +494,13 @@ def parse_args(input_args=None):
         default=1000, 
         help="Batch size for preprocessing dataset."
     )
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        default="sd3",
+        choices=["sd3", "flux"],
+        help="Type of ControlNet model to train: 'sd3' for standard ControlNet or 'flux' for Flux ControlNet.",
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -562,3 +547,20 @@ def parse_args(input_args=None):
         )
 
     return args 
+
+def main():
+    """Main function to run the training script."""
+    args = parse_args()
+    
+    # Import the appropriate training module based on model_type
+    if args.model_type == "sd3":
+        from relight.training.train_controlnet_sd3 import main as train_controlnet
+        train_controlnet(args)
+    elif args.model_type == "flux":
+        from relight.training.train_controlnet_flux import main as train_flux
+        train_flux(args)
+    else:
+        raise ValueError(f"Unknown model type: {args.model_type}")
+
+if __name__ == "__main__":
+    main() 

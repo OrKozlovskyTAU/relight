@@ -41,7 +41,8 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.testing_utils import backend_empty_cache
 from diffusers.utils.torch_utils import is_compiled_module
 from relight.cli.train import parse_args
-from relight.utils.training_utils import unwrap_model, save_model_card, get_sigmas, setup_accelerator, setup_logging, create_output_dir, save_checkpoint, validate_training_args, create_model_hooks, compute_text_embeddings, encode_prompt, _encode_prompt_with_clip, _encode_prompt_with_t5, load_models_and_tokenizers
+from relight.utils.training_utils import unwrap_model, save_model_card, get_sigmas, setup_accelerator, setup_logging, create_output_dir, save_checkpoint, validate_training_args, create_model_hooks, load_models, setup_weight_dtype, setup_training, setup_optimizer
+from relight.datasets import RelightDataset
 
 
 if is_wandb_available():
@@ -78,31 +79,16 @@ def log_validation(controlnet, args, accelerator, weight_dtype, step, is_final_v
     else:
         generator = torch.manual_seed(args.seed)
 
-    if len(args.validation_image) == len(args.validation_prompt):
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_image) == 1:
-        validation_images = args.validation_image * len(args.validation_prompt)
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_prompt) == 1:
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt * len(args.validation_image)
-    else:
-        raise ValueError(
-            "number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`"
-        )
+    validation_images = args.validation_image
+    if not isinstance(validation_images, list):
+        validation_images = [validation_images]
 
-    with torch.no_grad():
-        (
-            prompt_embeds,
-            negative_prompt_embeds,
-            pooled_prompt_embeds,
-            negative_pooled_prompt_embeds,
-        ) = pipeline.encode_prompt(
-            validation_prompts,
-            prompt_2=None,
-            prompt_3=None,
-        )
+    # Create null embeddings for validation
+    batch_size = len(validation_images)
+    prompt_embeds = torch.zeros((batch_size, 77, 768), dtype=weight_dtype)  # CLIP embeddings
+    pooled_prompt_embeds = torch.zeros((batch_size, 768), dtype=weight_dtype)  # CLIP pooled embeddings
+    negative_prompt_embeds = torch.zeros((batch_size, 77, 768), dtype=weight_dtype)
+    negative_pooled_prompt_embeds = torch.zeros((batch_size, 768), dtype=weight_dtype)
 
     del pipeline
     gc.collect()
@@ -127,7 +113,6 @@ def log_validation(controlnet, args, accelerator, weight_dtype, step, is_final_v
 
     for i, validation_image in enumerate(validation_images):
         validation_image = Image.open(validation_image).convert("RGB")
-        validation_prompt = validation_prompts[i]
 
         images = []
 
@@ -146,7 +131,7 @@ def log_validation(controlnet, args, accelerator, weight_dtype, step, is_final_v
             images.append(image)
 
         image_logs.append(
-            {"validation_image": validation_image, "images": images, "validation_prompt": validation_prompt}
+            {"validation_image": validation_image, "images": images}
         )
 
     tracker_key = "test" if is_final_validation else "validation"
@@ -154,7 +139,6 @@ def log_validation(controlnet, args, accelerator, weight_dtype, step, is_final_v
         if tracker.name == "tensorboard":
             for log in image_logs:
                 images = log["images"]
-                validation_prompt = log["validation_prompt"]
                 validation_image = log["validation_image"]
 
                 tracker.writer.add_image(
@@ -167,19 +151,18 @@ def log_validation(controlnet, args, accelerator, weight_dtype, step, is_final_v
 
                 formatted_images = np.stack(formatted_images)
 
-                tracker.writer.add_images(validation_prompt, formatted_images, step, dataformats="NHWC")
+                tracker.writer.add_images("Generated images", formatted_images, step, dataformats="NHWC")
         elif tracker.name == "wandb":
             formatted_images = []
 
             for log in image_logs:
                 images = log["images"]
-                validation_prompt = log["validation_prompt"]
                 validation_image = log["validation_image"]
 
                 formatted_images.append(wandb.Image(validation_image, caption="Controlnet conditioning"))
 
                 for image in images:
-                    image = wandb.Image(image, caption=validation_prompt)
+                    image = wandb.Image(image, caption="Generated image")
                     formatted_images.append(image)
 
             tracker.log({tracker_key: formatted_images})
@@ -195,153 +178,6 @@ def log_validation(controlnet, args, accelerator, weight_dtype, step, is_final_v
         return image_logs
 
 
-# Copied from dreambooth sd3 example
-def load_text_encoders(class_one, class_two, class_three):
-    text_encoder_one = class_one.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-    )
-    text_encoder_two = class_two.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
-    )
-    text_encoder_three = class_three.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder_3", revision=args.revision, variant=args.variant
-    )
-    return text_encoder_one, text_encoder_two, text_encoder_three
-
-
-# Copied from dreambooth sd3 example
-def import_model_class_from_model_name_or_path(
-    pretrained_model_name_or_path: str, revision: str, subfolder: str = "text_encoder"
-):
-    text_encoder_config = PretrainedConfig.from_pretrained(
-        pretrained_model_name_or_path, subfolder=subfolder, revision=revision
-    )
-    model_class = text_encoder_config.architectures[0]
-    if model_class == "CLIPTextModelWithProjection":
-        from transformers import CLIPTextModelWithProjection
-
-        return CLIPTextModelWithProjection
-    elif model_class == "T5EncoderModel":
-        from transformers import T5EncoderModel
-
-        return T5EncoderModel
-    else:
-        raise ValueError(f"{model_class} is not supported.")
-
-
-def make_train_dataset(args, tokenizer_one, tokenizer_two, tokenizer_three, accelerator):
-    # Get the datasets: you can either provide your own training and evaluation files (see below)
-    # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
-
-    # In distributed training, the load_dataset function guarantees that only one local process can concurrently
-    # download the dataset.
-    if args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
-            args.dataset_name,
-            args.dataset_config_name,
-            cache_dir=args.cache_dir,
-        )
-    else:
-        if args.train_data_dir is not None:
-            dataset = load_dataset(
-                args.train_data_dir,
-                cache_dir=args.cache_dir,
-                trust_remote_code=True,
-            )
-        # See more about loading custom images at
-        # https://huggingface.co/docs/datasets/v2.0.0/en/dataset_script
-
-    # Preprocessing the datasets.
-    # We need to tokenize inputs and targets.
-    column_names = dataset["train"].column_names
-
-    # 6. Get the column names for input/target.
-    if args.image_column is None:
-        image_column = column_names[0]
-        logger.info(f"image column defaulting to {image_column}")
-    else:
-        image_column = args.image_column
-        if image_column not in column_names:
-            raise ValueError(
-                f"`--image_column` value '{args.image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-            )
-
-    if args.caption_column is None:
-        caption_column = column_names[1]
-        logger.info(f"caption column defaulting to {caption_column}")
-    else:
-        caption_column = args.caption_column
-        if caption_column not in column_names:
-            raise ValueError(
-                f"`--caption_column` value '{args.caption_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-            )
-
-    if args.conditioning_image_column is None:
-        conditioning_image_column = column_names[2]
-        logger.info(f"conditioning image column defaulting to {conditioning_image_column}")
-    else:
-        conditioning_image_column = args.conditioning_image_column
-        if conditioning_image_column not in column_names:
-            raise ValueError(
-                f"`--conditioning_image_column` value '{args.conditioning_image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-            )
-
-    def process_captions(examples, is_train=True):
-        captions = []
-        for caption in examples[caption_column]:
-            if random.random() < args.proportion_empty_prompts:
-                captions.append("")
-            elif isinstance(caption, str):
-                captions.append(caption)
-            elif isinstance(caption, (list, np.ndarray)):
-                # take a random caption if there are multiple
-                captions.append(random.choice(caption) if is_train else caption[0])
-            else:
-                raise ValueError(
-                    f"Caption column `{caption_column}` should contain either strings or lists of strings."
-                )
-        return captions
-
-    image_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ]
-    )
-
-    conditioning_image_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-        ]
-    )
-
-    def preprocess_train(examples):
-        images = [image.convert("RGB") for image in examples[image_column]]
-        images = [image_transforms(image) for image in images]
-
-        conditioning_images = [image.convert("RGB") for image in examples[conditioning_image_column]]
-        conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
-
-        examples["pixel_values"] = images
-        examples["conditioning_pixel_values"] = conditioning_images
-        examples["prompts"] = process_captions(examples)
-
-        return examples
-
-    with accelerator.main_process_first():
-        if args.max_train_samples is not None:
-            dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
-        # Set the training transforms
-        train_dataset = dataset["train"].with_transform(preprocess_train)
-
-    return train_dataset
-
-
 def collate_fn(examples):
     pixel_values = torch.stack([example["pixel_values"] for example in examples])
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
@@ -349,8 +185,11 @@ def collate_fn(examples):
     conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
     conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    prompt_embeds = torch.stack([torch.tensor(example["prompt_embeds"]) for example in examples])
-    pooled_prompt_embeds = torch.stack([torch.tensor(example["pooled_prompt_embeds"]) for example in examples])
+    # Create null embeddings with the same shape as expected by the model
+    batch_size = len(examples)
+    # For SD3, we need 3 sets of embeddings (one for each text encoder)
+    prompt_embeds = torch.zeros((batch_size, 77, 768), dtype=torch.float32)  # CLIP embeddings
+    pooled_prompt_embeds = torch.zeros((batch_size, 768), dtype=torch.float32)  # CLIP pooled embeddings
 
     return {
         "pixel_values": pixel_values,
@@ -370,48 +209,30 @@ def main(args):
     # Set up logging
     logger = setup_logging(accelerator, args)
     
-    # Create output directory and handle repository creation
-    repo_id = create_output_dir(args, accelerator)
+    # Create output directory
+    create_output_dir(args, accelerator)
     
-    # Load models and tokenizers
-    models, (noise_scheduler, noise_scheduler_copy) = load_models_and_tokenizers(args, logger, model_type="sd3")
-    vae, transformer, controlnet, text_encoders, tokenizers = models
-    text_encoder_one, text_encoder_two, text_encoder_three = text_encoders
-    tokenizer_one, tokenizer_two, tokenizer_three = tokenizers
+    # Load models
+    models, (noise_scheduler, noise_scheduler_copy) = load_models(args, logger, model_type="sd3")
+    vae, transformer, controlnet = models
     
     weight_dtype = setup_weight_dtype(args, accelerator)
 
-    setup_training(args, accelerator, transformer, vae, text_encoders, tokenizers, controlnet, weight_dtype, model_type="sd3")
+    # Setup training
+    setup_training(args, accelerator, transformer, vae, controlnet, weight_dtype, model_type="sd3")
     
     # Create model hooks for saving and loading
     create_model_hooks(accelerator, args, [controlnet], model_type="sd3")
 
     optimizer = setup_optimizer(args, controlnet)
 
-    train_dataset = make_train_dataset(args, tokenizer_one, tokenizer_two, tokenizer_three, accelerator)
-
-    compute_embeddings_fn = functools.partial(
-        compute_text_embeddings,
-        text_encoders=text_encoders,
-        tokenizers=tokenizers,
-        device=accelerator.device
+    # Create train dataset
+    train_dataset = RelightDataset(
+        data_dir=args.train_data_dir,
+        resolution=args.resolution,
+        max_train_samples=args.max_train_samples,
+        seed=args.seed
     )
-    with accelerator.main_process_first():
-        from datasets.fingerprint import Hasher
-
-        # fingerprint used by the cache for the other processes to load the result
-        # details: https://github.com/huggingface/diffusers/pull/4038#discussion_r1266078401
-        new_fingerprint = Hasher.hash(args)
-        train_dataset = train_dataset.map(
-            compute_embeddings_fn,
-            batched=True,
-            batch_size=args.dataset_preprocess_batch_size,
-            new_fingerprint=new_fingerprint,
-        )
-
-    del text_encoder_one, text_encoder_two, text_encoder_three
-    del tokenizer_one, tokenizer_two, tokenizer_three
-    free_memory()
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -455,7 +276,6 @@ def main(args):
         tracker_config = dict(vars(args))
 
         # tensorboard cannot handle list types for config
-        tracker_config.pop("validation_prompt")
         tracker_config.pop("validation_image")
 
         accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
@@ -542,7 +362,7 @@ def main(args):
                 sigmas = get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype)
                 noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
 
-                # Get the text embedding for conditioning
+                # Get the text embedding for conditioning (using null embeddings)
                 prompt_embeds = batch["prompt_embeds"].to(dtype=weight_dtype)
                 pooled_prompt_embeds = batch["pooled_prompt_embeds"].to(dtype=weight_dtype)
 
@@ -632,7 +452,7 @@ def main(args):
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
+                    if args.validation_image is not None and global_step % args.validation_steps == 0:
                         image_logs = log_validation(
                             controlnet,
                             args,
@@ -656,7 +476,7 @@ def main(args):
 
         # Run a final round of validation.
         image_logs = None
-        if args.validation_prompt is not None:
+        if args.validation_image is not None:
             image_logs = log_validation(
                 controlnet=None,
                 args=args,
@@ -664,20 +484,6 @@ def main(args):
                 weight_dtype=weight_dtype,
                 step=global_step,
                 is_final_validation=True,
-            )
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                image_logs=image_logs,
-                base_model=args.pretrained_model_name_or_path,
-                repo_folder=args.output_dir,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
             )
 
     accelerator.end_training()

@@ -5,10 +5,7 @@ This module provides dataset classes for loading and preprocessing image pairs
 for training ControlNet and other models.
 """
 
-import os
-import json
-import random
-from typing import Optional, Dict, Any, List, Tuple, Union
+from typing import Optional, Dict
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
@@ -18,57 +15,62 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-class ImagePairDataset(Dataset):
+class RelightDataset(Dataset):
     """
-    Dataset for loading pairs of images for training.
+    Dataset for loading pairs of control and target images for training.
     
-    This dataset loads input images, control images, and target images
-    from specified directories and applies transformations to them.
+    This dataset loads control images and target images from the same directory
+    with specific naming patterns:
+    - Target images: XXXXX_render_00000.jpg
+    - Control images: XXXXX_diffdir_00000.jpg
+    where XXXXX is a 5-digit index starting from 0.
     """
     
     def __init__(self, 
-                 input_dir: str,
-                 control_dir: str,
-                 target_dir: str,
+                 data_dir: str,
+                 control_transform: Optional[transforms.Compose] = None,
+                 target_transform: Optional[transforms.Compose] = None,
                  image_size: int = 512,
-                 transform: Optional[transforms.Compose] = None,
-                 caption_file: Optional[str] = None):
+                 normalize_images: bool = True):
         """
         Initialize the dataset.
         
         Args:
-            input_dir: Directory containing input images
-            control_dir: Directory containing control images
-            target_dir: Directory containing target images
+            data_dir: Directory containing both control and target images
+            control_transform: Transform to apply to control images
+            target_transform: Transform to apply to target images
             image_size: Size to resize images to
-            transform: Optional custom transform to apply to images
-            caption_file: Optional path to a file containing captions for images
+            normalize_images: Whether to normalize images to [-1, 1]
         """
-        self.input_dir = Path(input_dir)
-        self.control_dir = Path(control_dir)
-        self.target_dir = Path(target_dir)
+        self.data_dir = Path(data_dir)
         self.image_size = image_size
         
-        # Default transform if none provided
-        self.transform = transform or transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5])
-        ])
+        # Default transforms if none provided
+        if control_transform is None:
+            control_transform = transforms.Compose([
+                transforms.Resize(image_size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+            ])
+            if normalize_images:
+                control_transform.transforms.append(transforms.Normalize([0.5], [0.5]))
+                
+        if target_transform is None:
+            target_transform = transforms.Compose([
+                transforms.Resize(image_size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+            ])
+            if normalize_images:
+                target_transform.transforms.append(transforms.Normalize([0.5], [0.5]))
         
-        # Get list of image files
-        self.image_files = sorted([f for f in self.input_dir.glob("*.png")])
+        self.control_transform = control_transform
+        self.target_transform = target_transform
+        
+        # Get list of target image files
+        self.image_files = sorted([f for f in self.data_dir.glob("*_render_0000.png")])
         if not self.image_files:
-            self.image_files = sorted([f for f in self.input_dir.glob("*.jpg")])
-            
-        if not self.image_files:
-            raise ValueError(f"No image files found in {input_dir}")
-            
-        # Load captions if provided
-        self.captions = {}
-        if caption_file:
-            with open(caption_file, "r") as f:
-                self.captions = json.load(f)
+            raise ValueError(f"No target image files found in {data_dir}")
                 
         logger.info(f"Loaded {len(self.image_files)} image pairs")
     
@@ -84,105 +86,69 @@ class ImagePairDataset(Dataset):
             idx: Index of the sample to get
             
         Returns:
-            Dictionary containing input, control, and target images
+            Dictionary containing control and target images
         """
-        # Get image paths
-        input_path = self.image_files[idx]
-        control_path = self.control_dir / input_path.name
-        target_path = self.target_dir / input_path.name
+        # Get base filename (XXXXX)
+        target_path = self.image_files[idx]
+        base_name = target_path.stem.split('_')[0]
+        
+        # Construct control image path
+        control_path = self.data_dir / f"{base_name}_diffdir_0000.png"
         
         # Load images
-        input_image = Image.open(input_path).convert("RGB")
         control_image = Image.open(control_path).convert("RGB")
         target_image = Image.open(target_path).convert("RGB")
         
         # Apply transforms
-        if self.transform:
-            input_image = self.transform(input_image)
-            control_image = self.transform(control_image)
-            target_image = self.transform(target_image)
-        
-        # Get caption if available
-        caption = self.captions.get(input_path.stem, "")
+        control_image = self.control_transform(control_image)
+        target_image = self.target_transform(target_image)
             
         return {
-            'input': input_image,
-            'control': control_image,
-            'target': target_image,
-            'caption': caption,
-            'input_file': input_path.name,
+            'conditioning_pixel_values': control_image,
+            'pixel_values': target_image,
             'control_file': control_path.name,
             'target_file': target_path.name
-        } 
+        }
 
-def get_train_dataset(
-    args,
-    transform: Optional[transforms.Compose] = None,
-) -> Dataset:
-    """
-    Get a training dataset based on the provided arguments.
+
+def main():
+    """Debug function to visualize dataset samples."""
+    from torchvision.utils import make_grid
+    import matplotlib.pyplot as plt
+    import torch
     
-    Args:
-        args: Arguments containing dataset configuration
-        transform: Optional transform to apply to images
-        
-    Returns:
-        A dataset for training
-    """
-    if transform is None:
-        transform = transforms.Compose(
-            [
-                transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(args.resolution),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5]),
-            ]
-        )
-        
-    if args.input_dir is not None:
-        # Use custom dataset with image pairs
-        dataset = ImagePairDataset(
-            input_dir=args.input_dir,
-            control_dir=args.control_dir,
-            target_dir=args.target_dir,
-            caption_file=args.caption_file,
-            transform=transform,
-        )
-    else:
-        # Use HuggingFace dataset
-        from datasets import load_dataset
-        
-        if args.dataset_name is not None:
-            dataset = load_dataset(
-                args.dataset_name,
-                args.dataset_config_name,
-                cache_dir=args.cache_dir,
-            )
-        else:
-            dataset = load_dataset(
-                "imagefolder",
-                data_dir=args.train_data_dir,
-                cache_dir=args.cache_dir,
-            )
-            
-        # Preprocess dataset
-        def preprocess_function(examples):
-            images = [image.convert("RGB") for image in examples[args.image_column]]
-            examples["pixel_values"] = [transform(image) for image in images]
-            
-            if args.conditioning_image_column in examples:
-                images = [image.convert("RGB") for image in examples[args.conditioning_image_column]]
-                examples["conditioning_pixel_values"] = [transform(image) for image in images]
-                
-            return examples
-            
-        with torch.no_grad():
-            dataset = dataset.map(
-                preprocess_function,
-                batched=True,
-                batch_size=args.dataset_preprocess_batch_size,
-                remove_columns=[col for col in dataset.column_names if col != args.image_column],
-            )
-            
-    return dataset 
+    # Create dataset
+    dataset = RelightDataset(
+        data_dir=Path("C:/repos/relight/output"),
+        image_size=256,
+        normalize_images=True
+    )
+    
+    # Get 25 samples
+    samples = []
+    for i in range(25):
+        sample = dataset[i]
+        # Denormalize images
+        control = (sample['conditioning_pixel_values'] + 1) / 2
+        target = (sample['pixel_values'] + 1) / 2
+        # Stack control and target horizontally
+        pair = torch.cat([control, target], dim = 2)
+        samples.append(pair)
+    
+    # Make 5x5 grid
+    grid = make_grid(samples, nrow = 5, padding = 20, pad_value = 1)  # Add padding between grid items
+    
+    # Convert to numpy and transpose for plotting
+    grid = grid.numpy().transpose(1, 2, 0)
+    
+    # Plot with figure size matching grid dimensions
+    h, w = grid.shape[:2]
+    aspect_ratio = w / h
+    plt.figure(figsize=(10 * aspect_ratio, 10))
+    plt.imshow(grid)
+    plt.axis('off')
+    plt.savefig('C:/repos/relight/output/dataset_samples.png')
+    plt.close()
+
+if __name__ == "__main__":
+    main()

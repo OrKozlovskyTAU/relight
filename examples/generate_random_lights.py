@@ -60,6 +60,7 @@ def main():
     generate_random_light_dataset(
         start_index=args.start_index,
         n_images=args.n_images,
+        output_dir=output_dir,
         use_gpu=not args.no_gpu,
         show_progress=not args.no_progress,
         grid_mode=args.grid_mode

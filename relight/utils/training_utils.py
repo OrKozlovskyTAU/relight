@@ -179,19 +179,10 @@ def setup_logging(accelerator, args):
     return logger
 
 def create_output_dir(args, accelerator):
-    """Create output directory and handle repository creation."""
+    """Create output directory."""
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, 
-                exist_ok=True, 
-                token=args.hub_token
-            ).repo_id
-            return repo_id
-    return None
 
 def save_checkpoint(accelerator, args, global_step, checkpoints_total_limit=None):
     """Save a checkpoint of the training state."""
@@ -220,12 +211,6 @@ def save_checkpoint(accelerator, args, global_step, checkpoints_total_limit=None
 
 def validate_training_args(args):
     """Validate training arguments."""
-    if args.report_to == "wandb" and args.hub_token is not None:
-        raise ValueError(
-            "You cannot use both --report_to=wandb and --hub_token due to a security risk of exposing your token."
-            " Please use `huggingface-cli login` to authenticate with the Hub."
-        )
-
     if args.report_to == "wandb":
         if not is_wandb_available():
             raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
@@ -238,119 +223,9 @@ def validate_training_args(args):
     
     return True
 
-def compute_text_embeddings(batch, text_encoders, tokenizers, device, proportion_empty_prompts=0, max_sequence_length=77):
-    """Compute text embeddings for a batch.
-    
-    Args:
-        batch: The batch containing prompts
-        text_encoders: List of text encoders
-        tokenizers: List of tokenizers
-        proportion_empty_prompts: Proportion of empty prompts for classifier-free guidance
-        is_train: Whether in training mode
-        max_sequence_length: Maximum sequence length for tokenization
-        return_dict: Whether to return a dictionary with embeddings or tuple
-        
-    Returns:
-        If return_dict is True, returns a dictionary with prompt_embeds and pooled_prompt_embeds
-        Otherwise, returns a tuple of (prompt_embeds, pooled_embeds, uncond_embeds)
+def load_models(args, logger, model_type="sd3"):
     """
-    # Get the text embeddings for conditioning
-    prompt_key = "prompts" if "prompts" in batch else "prompt"
-    prompt = batch[prompt_key]
-    
-    with torch.no_grad():
-        prompt_embeds, pooled_embeds = encode_prompt(
-            text_encoders,
-            tokenizers,
-            prompt,
-            max_sequence_length=max_sequence_length,
-            device=text_encoders[0].device,
-            num_images_per_prompt=1,
-        )
-    
-    # Get the unconditional embeddings for classifier-free guidance
-    if proportion_empty_prompts > 0:
-        uncond_tokens = [""] * (batch[prompt_key].size(0) if isinstance(batch[prompt_key], torch.Tensor) else len(batch[prompt_key]))
-        with torch.no_grad():
-            uncond_embeds, _ = encode_prompt(
-                text_encoders,
-                tokenizers,
-                uncond_tokens,
-                max_sequence_length=max_sequence_length,
-                device=text_encoders[0].device,
-                num_images_per_prompt=1,
-            )
-    else:
-        uncond_embeds = None
-    
-    return {"prompt_embeds": prompt_embeds.to(device), "pooled_prompt_embeds": pooled_embeds.to(device)}
-
-def encode_prompt(text_encoders, tokenizers, prompt, max_sequence_length, device=None, num_images_per_prompt=1):
-    """Encode prompt using text encoders."""
-    prompt_embeds = []
-    pooled_embeds = []
-    
-    for text_encoder, tokenizer in zip(text_encoders, tokenizers):
-        if isinstance(text_encoder, transformers.models.clip.modeling_clip.CLIPTextModel):
-            prompt_embeds_one, pooled_embeds_one = _encode_prompt_with_clip(
-                text_encoder, tokenizer, prompt, device, num_images_per_prompt
-            )
-            prompt_embeds.append(prompt_embeds_one)
-            pooled_embeds.append(pooled_embeds_one)
-        elif isinstance(text_encoder, transformers.models.t5.modeling_t5.T5EncoderModel):
-            prompt_embeds_one = _encode_prompt_with_t5(
-                text_encoder, tokenizer, prompt, max_sequence_length, device, num_images_per_prompt
-            )
-            prompt_embeds.append(prompt_embeds_one)
-            pooled_embeds.append(None)
-    
-    return prompt_embeds, pooled_embeds
-
-def _encode_prompt_with_clip(text_encoder, tokenizer, prompt, device=None, num_images_per_prompt=1):
-    """Encode prompt using CLIP text encoder."""
-    batch_size = len(prompt)
-    text_inputs = tokenizer(
-        prompt,
-        padding="max_length",
-        max_length=tokenizer.model_max_length,
-        truncation=True,
-        return_tensors="pt",
-    )
-    text_input_ids = text_inputs.input_ids.to(device)
-    
-    with torch.no_grad():
-        text_outputs = text_encoder(text_input_ids)
-        pooled_embeds = text_outputs[0]
-        prompt_embeds = text_outputs[1]
-    
-    prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
-    pooled_embeds = pooled_embeds.repeat_interleave(num_images_per_prompt, dim=0)
-    
-    return prompt_embeds, pooled_embeds
-
-def _encode_prompt_with_t5(text_encoder, tokenizer, prompt, max_sequence_length, device=None, num_images_per_prompt=1):
-    """Encode prompt using T5 text encoder."""
-    batch_size = len(prompt)
-    text_inputs = tokenizer(
-        prompt,
-        padding="max_length",
-        max_length=max_sequence_length,
-        truncation=True,
-        return_tensors="pt",
-    )
-    text_input_ids = text_inputs.input_ids.to(device)
-    
-    with torch.no_grad():
-        text_outputs = text_encoder(text_input_ids)
-        prompt_embeds = text_outputs[0]
-    
-    prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
-    
-    return prompt_embeds 
-
-def load_models_and_tokenizers(args, logger, model_type="sd3"):
-    """
-    Load models and tokenizers for training.
+    Load essential models for training.
     
     Args:
         args: Training arguments
@@ -358,48 +233,15 @@ def load_models_and_tokenizers(args, logger, model_type="sd3"):
         model_type: Either "sd3" or "flux" to determine which models to load
         
     Returns:
-        Tuple of (models, schedulers) where models is a tuple of (vae, transformer, controlnet, text_encoders, tokenizers)
+        Tuple of (models, schedulers) where models is a tuple of (vae, transformer, controlnet)
         and schedulers is a tuple of (noise_scheduler, noise_scheduler_copy)
     """
     if model_type == "sd3":
-        # Load the tokenizers
-        tokenizer_one = CLIPTokenizer.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="tokenizer",
-            revision=args.revision,
-        )
-        tokenizer_two = CLIPTokenizer.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="tokenizer_2",
-            revision=args.revision,
-        )
-        tokenizer_three = T5TokenizerFast.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="tokenizer_3",
-            revision=args.revision,
-        )
-        tokenizers = [tokenizer_one, tokenizer_two, tokenizer_three]
-
-        # import correct text encoder class
-        text_encoder_cls_one = import_model_class_from_model_name_or_path(
-            args.pretrained_model_name_or_path, args.revision
-        )
-        text_encoder_cls_two = import_model_class_from_model_name_or_path(
-            args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_2"
-        )
-        text_encoder_cls_three = import_model_class_from_model_name_or_path(
-            args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_3"
-        )
-
         # Load scheduler and models
         noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="scheduler"
         )
         noise_scheduler_copy = copy.deepcopy(noise_scheduler)
-        text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
-            text_encoder_cls_one, text_encoder_cls_two, text_encoder_cls_three
-        )
-        text_encoders = [text_encoder_one, text_encoder_two, text_encoder_three]
         
         vae = AutoencoderKL.from_pretrained(
             args.pretrained_model_name_or_path,
@@ -420,30 +262,6 @@ def load_models_and_tokenizers(args, logger, model_type="sd3"):
                 transformer, num_extra_conditioning_channels=args.num_extra_conditioning_channels
             )
     else:  # flux
-        # Load the tokenizer
-        tokenizer_one = AutoTokenizer.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="tokenizer",
-            revision=args.revision,
-        )
-        # load t5 tokenizer
-        tokenizer_two = AutoTokenizer.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="tokenizer_2",
-            revision=args.revision,
-        )
-        tokenizers = [tokenizer_one, tokenizer_two]
-
-        # load clip text encoder
-        text_encoder_one = CLIPTextModel.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-        )
-        # load t5 text encoder
-        text_encoder_two = T5EncoderModel.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
-        )
-        text_encoders = [text_encoder_one, text_encoder_two]
-
         vae = AutoencoderKL.from_pretrained(
             args.pretrained_model_name_or_path,
             subfolder="vae",
@@ -461,7 +279,6 @@ def load_models_and_tokenizers(args, logger, model_type="sd3"):
             controlnet = FluxControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
         else:
             logger.info("Initializing controlnet weights from transformer")
-            # we can define the num_layers, num_single_layers,
             controlnet = FluxControlNetModel.from_transformer(
                 transformer,
                 attention_head_dim=transformer.config["attention_head_dim"],
@@ -477,7 +294,7 @@ def load_models_and_tokenizers(args, logger, model_type="sd3"):
         )
         noise_scheduler_copy = copy.deepcopy(noise_scheduler)
 
-    return (vae, transformer, controlnet, text_encoders, tokenizers), (noise_scheduler, noise_scheduler_copy)
+    return (vae, transformer, controlnet), (noise_scheduler, noise_scheduler_copy)
 
 def create_model_hooks(accelerator, args, models, model_type="sd3"):
     """
@@ -540,14 +357,11 @@ def setup_weight_dtype(args, accelerator):
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
-    
     return weight_dtype
 
-def setup_training(args, accelerator, transformer, vae, text_encoders, tokenizers, controlnet, weight_dtype, model_type="sd3"):
+def setup_training(args, accelerator, transformer, vae, controlnet, weight_dtype, model_type="sd3"):
     transformer.requires_grad_(False)
     vae.requires_grad_(False)
-    for text_encoder in text_encoders:
-        text_encoder.requires_grad_(False)
     controlnet.train()
     
     if model_type == "flux":
@@ -597,12 +411,10 @@ def setup_training(args, accelerator, transformer, vae, text_encoders, tokenizer
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
     
-    # Move vae, transformer and text_encoder to device and cast to weight_dtype
+    # Move vae and transformer to device and cast to weight_dtype
     if args.upcast_vae:
         vae.to(accelerator.device, dtype=torch.float32)
     else:
         vae.to(accelerator.device, dtype=weight_dtype)
     transformer.to(accelerator.device, dtype=weight_dtype)
-    for text_encoder in text_encoders:
-        text_encoder.to(accelerator.device, dtype=weight_dtype)
     
