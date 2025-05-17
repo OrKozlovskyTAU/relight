@@ -34,20 +34,13 @@ def generate_grid_positions(x_range, y_range, z_range, grid_size):
     Returns:
         list: List of (x, y, z) positions
     """
-    # Round down to nearest power of 3
-    grid_size = 3 ** math.floor(math.log(grid_size, 3))
-    
     # Create grid points
     x_points = np.linspace(x_range[0], x_range[1], grid_size)
     y_points = np.linspace(y_range[0], y_range[1], grid_size)
     z_points = np.linspace(z_range[0], z_range[1], grid_size)
     
     # Generate all combinations
-    positions = []
-    for x in x_points:
-        for y in y_points:
-            for z in z_points:
-                positions.append((x, y, z))
+    positions = [(x, y, z) for x in x_points for y in y_points for z in z_points]
     
     return positions
 
@@ -90,7 +83,7 @@ def generate_random_light_dataset(start_index, n_images, output_dir, use_gpu=Tru
         "render_diffindir_png"
     ]
    
-    eps = 0.001
+    eps = 0.05
     # Define bounds for positioning based on the actual box dimensions
     x_range = [-0.25 + eps, 0.25 - eps]
     y_range = [-0.25 + eps, 0.4 - eps]

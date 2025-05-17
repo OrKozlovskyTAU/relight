@@ -86,42 +86,25 @@ def log_validation(
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-    if len(args.validation_image) == len(args.validation_prompt):
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_image) == 1:
-        validation_images = args.validation_image * len(args.validation_prompt)
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_prompt) == 1:
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt * len(args.validation_image)
-    else:
-        raise ValueError(
-            "number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`"
-        )
-
+    validation_data_dirs = args.validation_data_dir if isinstance(args.validation_data_dir, list) else [args.validation_data_dir]
     image_logs = []
     if is_final_validation or torch.backends.mps.is_available():
         autocast_ctx = nullcontext()
     else:
         autocast_ctx = torch.autocast(accelerator.device.type)
 
-    for validation_prompt, validation_image in zip(validation_prompts, validation_images):
+    for validation_data_dir in validation_data_dirs:
         from diffusers.utils import load_image
 
-        validation_image = load_image(validation_image)
-        # maybe need to inference on 1024 to get a good image
+        validation_image = load_image(validation_data_dir)
         validation_image = validation_image.resize((args.resolution, args.resolution))
 
         images = []
-
-        # pre calculate  prompt embeds, pooled prompt embeds, text ids because t5 does not support autocast
         prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
-            validation_prompt, prompt_2=validation_prompt
+            "", prompt_2=""
         )
         for _ in range(args.num_validation_images):
             with autocast_ctx:
-                # need to fix in pipeline_flux_controlnet
                 image = pipeline(
                     prompt_embeds=prompt_embeds,
                     pooled_prompt_embeds=pooled_prompt_embeds,
@@ -134,7 +117,7 @@ def log_validation(
             image = image.resize((args.resolution, args.resolution))
             images.append(image)
         image_logs.append(
-            {"validation_image": validation_image, "images": images, "validation_prompt": validation_prompt}
+            {"validation_data_dir": validation_image, "images": images}
         )
 
     tracker_key = "test" if is_final_validation else "validation"
@@ -142,29 +125,27 @@ def log_validation(
         if tracker.name == "tensorboard":
             for log in image_logs:
                 images = log["images"]
-                validation_prompt = log["validation_prompt"]
-                validation_image = log["validation_image"]
+                validation_data_dir = log["validation_data_dir"]
 
-                formatted_images = [np.asarray(validation_image)]
+                formatted_images = [np.asarray(validation_data_dir)]
 
                 for image in images:
                     formatted_images.append(np.asarray(image))
 
                 formatted_images = np.stack(formatted_images)
 
-                tracker.writer.add_images(validation_prompt, formatted_images, step, dataformats="NHWC")
+                tracker.writer.add_images("validation", formatted_images, step, dataformats="NHWC")
         elif tracker.name == "wandb":
             formatted_images = []
 
             for log in image_logs:
                 images = log["images"]
-                validation_prompt = log["validation_prompt"]
-                validation_image = log["validation_image"]
+                validation_data_dir = log["validation_data_dir"]
 
-                formatted_images.append(wandb.Image(validation_image, caption="Controlnet conditioning"))
+                formatted_images.append(wandb.Image(validation_data_dir, caption="Controlnet conditioning"))
 
                 for image in images:
-                    image = wandb.Image(image, caption=validation_prompt)
+                    image = wandb.Image(image, caption="validation")
                     formatted_images.append(image)
 
             tracker.log({tracker_key: formatted_images})
@@ -403,8 +384,7 @@ def main(args):
         tracker_config = dict(vars(args))
 
         # tensorboard cannot handle list types for config
-        tracker_config.pop("validation_prompt")
-        tracker_config.pop("validation_image")
+        # tracker_config.pop("validation_prompt")
 
         accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
 
@@ -603,15 +583,7 @@ def main(args):
                         logger.info(f"Saved state to {save_path}")
 
                     if args.validation_prompt is not None and global_step % args.validation_steps == 0:
-                        image_logs = log_validation(
-                            vae=vae,
-                            flux_transformer=transformer,
-                            flux_controlnet=controlnet,
-                            args=args,
-                            accelerator=accelerator,
-                            weight_dtype=weight_dtype,
-                            step=global_step,
-                        )
+                        pass
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
@@ -636,16 +608,7 @@ def main(args):
         # Setting `vae`, `unet`, and `controlnet` to None to load automatically from `args.output_dir`.
         image_logs = None
         if args.validation_prompt is not None:
-            image_logs = log_validation(
-                vae=vae,
-                flux_transformer=transformer,
-                flux_controlnet=None,
-                args=args,
-                accelerator=accelerator,
-                weight_dtype=weight_dtype,
-                step=global_step,
-                is_final_validation=True,
-            )
+            pass
 
     accelerator.end_training()
 

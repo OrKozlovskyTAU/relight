@@ -12,4 +12,5 @@ datasets>=2.14.0
 ftfy
 tensorboard
 Jinja2
-wandb 
+wandb
+simple_slurm 

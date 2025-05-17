@@ -1,4 +1,5 @@
 import argparse
+import os
 
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Training script for ControlNet models.")
@@ -270,26 +271,12 @@ def parse_args(input_args=None):
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).",
     )
     parser.add_argument(
-        "--validation_image",
+        "--validation_data_dir",
         type=str,
         default=None,
-        nargs="+",
         help=(
-            "A set of paths to the controlnet conditioning image be evaluated every `--validation_steps`"
-            " and logged to `--report_to`. Provide either a matching number of `--validation_prompt`s, a"
-            " a single `--validation_prompt` to be used with all `--validation_image`s, or a single"
-            " `--validation_image` that will be used with all `--validation_prompt`s."
-        ),
-    )
-    parser.add_argument(
-        "--validation_prompt",
-        type=str,
-        default=None,
-        nargs="+",
-        help=(
-            "A set of prompts evaluated every `--validation_steps` and logged to `--report_to`."
-            " Provide either a matching number of `--validation_image`s, a single `--validation_image`"
-            " to be used with all prompts, or a single prompt that will be used with all `--validation_image`s."
+            "Path to a folder containing controlnet conditioning images to be evaluated every `--validation_steps` "
+            "and logged to `--report_to`. The folder should contain images matching the expected naming pattern."
         ),
     )
     parser.add_argument(
@@ -501,6 +488,12 @@ def parse_args(input_args=None):
         choices=["sd3", "flux", "sd"],
         help="Type of ControlNet model to train: 'sd3' for standard ControlNet, 'flux' for Flux ControlNet, or 'sd' for ControlNet with null text embeddings.",
     )
+    parser.add_argument(
+        "--log_training_example_steps",
+        type=int,
+        default=None,
+        help="Number of steps between logging a 2x2 grid of model_pred vs target visualizations during training. If not set, no training example visualizations are logged."
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -523,23 +516,9 @@ def parse_args(input_args=None):
     if args.proportion_empty_prompts < 0 or args.proportion_empty_prompts > 1:
         raise ValueError("`--proportion_empty_prompts` must be in the range [0, 1].")
 
-    if args.validation_prompt is not None and args.validation_image is None:
-        raise ValueError("`--validation_image` must be set if `--validation_prompt` is set")
-
-    if args.validation_prompt is None and args.validation_image is not None:
-        raise ValueError("`--validation_prompt` must be set if `--validation_image` is set")
-
-    if (
-        args.validation_image is not None
-        and args.validation_prompt is not None
-        and len(args.validation_image) != 1
-        and len(args.validation_prompt) != 1
-        and len(args.validation_image) != len(args.validation_prompt)
-    ):
-        raise ValueError(
-            "Must provide either 1 `--validation_image`, 1 `--validation_prompt`,"
-            " or the same number of `--validation_prompt`s and `--validation_image`s"
-        )
+    if args.validation_data_dir is not None:
+        if not os.path.isdir(args.validation_data_dir):
+            raise ValueError(f"`--validation_data_dir` must be a path to a folder, got {args.validation_data_dir}")
 
     if args.resolution % 8 != 0:
         raise ValueError(
@@ -560,8 +539,9 @@ def main():
         from relight.training.train_controlnet_flux import main as train_flux
         train_flux(args)
     elif args.model_type == "sd":
-        from relight.training.train_controlnet import main as train_null_text
-        train_null_text(args)
+        from relight.training.train_controlnet import main, ControlNetTrainConfig
+        config = ControlNetTrainConfig.from_args(args)
+        main(config)
     else:
         raise ValueError(f"Unknown model type: {args.model_type}")
 
