@@ -222,9 +222,9 @@ class ControlNetTrainConfig:
     # Only has effect on compatible NVIDIA hardware.
     allow_tf32: bool = False
 
-    # Number of steps between logging a visualization of training examples.
-    # If None, no training example visualizations are logged.
-    log_training_example_steps: Optional[int] = None
+    # Number of inference steps to use during validation image generation.
+    # Controls the maximum number of denoising steps for validation samples.
+    validation_num_inference_steps: int = 50
 
     @staticmethod
     def from_args(args) -> ControlNetTrainConfig:
@@ -292,14 +292,15 @@ def log_validation(
         target_image = Image.open(target_image_path).convert("RGB")
 
         images = []
-        for i in range(config.num_validation_images):
-            logger.debug("Generating validation image %d/%d for sample %d", 
-                        i + 1, config.num_validation_images, idx + 1)
+        steps_range = np.linspace(0, config.validation_num_inference_steps, config.num_validation_images, dtype=int)
+        for i, num_steps in enumerate(steps_range):
+            logger.debug("Generating validation image %d/%d for sample %d with %d steps", 
+                        i + 1, config.num_validation_images, idx + 1, num_steps)
             with inference_ctx:
                 image = pipeline(
                     "",  # Null prompt
                     control_image,
-                    num_inference_steps=20,
+                    num_inference_steps=num_steps,
                     generator=generator
                 ).images[0]
             images.append(image)
@@ -401,6 +402,7 @@ def main(config: ControlNetTrainConfig):
     # Load scheduler and models
     logger.info("Loading noise scheduler from: %s", config.pretrained_model_name_or_path)
     noise_scheduler = DDPMScheduler.from_pretrained(config.pretrained_model_name_or_path, subfolder="scheduler")
+    logger.info("Noise scheduler config: %s", noise_scheduler.config)
     logger.info("Loading VAE from: %s", config.pretrained_model_name_or_path)
     vae = AutoencoderKL.from_pretrained(
         config.pretrained_model_name_or_path, subfolder="vae", revision=config.revision, variant=config.variant
@@ -782,58 +784,6 @@ def main(config: ControlNetTrainConfig):
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
-
-            # Log a 2x2 grid of model_pred vs target visualizations every log_training_example_steps
-            if config.log_training_example_steps is not None and global_step % config.log_training_example_steps == 0 and accelerator.is_main_process:
-
-                # Take up to 4 examples from the current batch
-                num_examples = min(4, model_pred.shape[0])
-                preds = model_pred[:num_examples].detach().cpu()
-                targets = target[:num_examples].detach().cpu()
-
-                # Preprocess for visualization: normalize to [0, 1] and convert to 3-channel if needed
-                def preprocess_for_vis(tensor):
-                    # If shape is (C, H, W), move to (H, W, C)
-                    if tensor.ndim == 3:
-                        arr = tensor
-                    else:
-                        arr = tensor.squeeze(0)
-                    arr = arr.float()
-                    # Normalize to [0, 1] for visualization
-                    arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
-                    # If single channel, repeat to 3 channels
-                    if arr.shape[0] == 1:
-                        arr = arr.repeat(3, 1, 1)
-                    elif arr.shape[0] == 2:
-                        arr = torch.cat([arr, torch.zeros_like(arr[:1])], dim=0)
-                    elif arr.shape[0] > 3:
-                        arr = arr[:3]
-                    return arr
-
-                vis_pairs = []
-                for i in range(num_examples):
-                    pred_img = preprocess_for_vis(preds[i])
-                    target_img = preprocess_for_vis(targets[i])
-                    # Concatenate side by side (C, H, W)
-                    pair = torch.cat([pred_img, target_img], dim=2)
-                    vis_pairs.append(pair)
-
-                # Pad to 4 if less
-                while len(vis_pairs) < 4:
-                    vis_pairs.append(torch.zeros_like(vis_pairs[0]))
-
-                # Make 2x2 grid (list of 4 tensors)
-                grid = vutils.make_grid(vis_pairs, nrow=2, padding=2)
-                grid_np = (grid.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                grid_img = Image.fromarray(grid_np)
-
-                for tracker in accelerator.trackers:
-                    if tracker.name == "tensorboard":
-                        tracker.writer.add_image("train_examples", np.array(grid_img).transpose(2, 0, 1), global_step)
-                    elif tracker.name == "wandb":
-                        tracker.log({"train_examples": [wandb.Image(grid_img, caption="model_pred | target (2x2 grid)")]}, step=global_step)
-                    else:
-                        logger.warning(f"Image logging not implemented for {tracker.name}")
 
             if global_step >= config.max_train_steps:
                 logger.info("Reached max training steps. Ending training loop.")

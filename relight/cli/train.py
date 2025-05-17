@@ -489,10 +489,10 @@ def parse_args(input_args=None):
         help="Type of ControlNet model to train: 'sd3' for standard ControlNet, 'flux' for Flux ControlNet, or 'sd' for ControlNet with null text embeddings.",
     )
     parser.add_argument(
-        "--log_training_example_steps",
+        "--validation_num_inference_steps",
         type=int,
-        default=None,
-        help="Number of steps between logging a 2x2 grid of model_pred vs target visualizations during training. If not set, no training example visualizations are logged."
+        default=50,
+        help="Number of inference steps to use during validation image generation.",
     )
 
     if input_args is not None:

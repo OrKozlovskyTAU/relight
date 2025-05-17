@@ -48,7 +48,6 @@ train_script = 'accelerate launch \
   --train_batch_size=4 \
   --max_train_steps=5000 \
   --validation_steps=500 \
-  --log_training_example_steps=100 \
   --num_validation_images=4'
     
 # Submit the job
