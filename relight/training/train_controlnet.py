@@ -35,6 +35,8 @@ from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
 from PIL import Image
 from tqdm.auto import tqdm
+from PIL import ImageDraw
+from PIL import ImageFont
 
 import diffusers
 from diffusers import (
@@ -292,7 +294,7 @@ def log_validation(
         target_image = Image.open(target_image_path).convert("RGB")
 
         images = []
-        steps_range = np.linspace(0, config.validation_num_inference_steps, config.num_validation_images, dtype=int)
+        steps_range = np.linspace(10, config.validation_num_inference_steps, config.num_validation_images, dtype=int)
         for i, num_steps in enumerate(steps_range):
             logger.debug("Generating validation image %d/%d for sample %d with %d steps", 
                         i + 1, config.num_validation_images, idx + 1, num_steps)
@@ -324,11 +326,29 @@ def log_validation(
             formatted_images = []
             for log in image_logs:
                 images = log["images"]
+                # Create captions for each image
+                captions = ["Target", "Control"]
+                steps_range = np.linspace(10, config.validation_num_inference_steps, config.num_validation_images, dtype=int)
+                captions.extend([f"Generated | steps {int(steps)}" for steps in steps_range])
+                
+                # Add captions below images
+                captioned_images = []
+                for img, caption in zip(images, captions):
+                    img_array = np.asarray(img)
+                    # Add white space below image for caption
+                    caption_space = np.ones((50, img_array.shape[1], 3), dtype=np.uint8) * 255
+                    captioned_img = np.concatenate([img_array, caption_space], axis=0)
+                    # Add caption text
+                    captioned_img = Image.fromarray(captioned_img)
+                    draw = ImageDraw.Draw(captioned_img)
+                    font = ImageFont.truetype("DejaVuSans", 20)
+                    draw.text((10, img_array.shape[0] + 5), caption, font=font, fill=(0, 0, 0))
+                    captioned_images.append(np.array(captioned_img))
+                
                 # Concatenate images horizontally
-                concat_image = np.concatenate([np.asarray(img) for img in images], axis=1)
-                # Log both individual and concatenated images
+                concat_image = np.concatenate(captioned_images, axis=1)
                 formatted_images.append(
-                    wandb.Image(concat_image, caption="Target, Control & Generated")
+                    wandb.Image(concat_image)
                 )
             tracker.log({tracker_key: formatted_images})
         else:

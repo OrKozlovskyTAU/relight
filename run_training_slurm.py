@@ -35,20 +35,21 @@ train_script = 'accelerate launch \
   --num_machines=1 \
   --mixed_precision=no \
   --dynamo_backend=no \
-  --main_process_port=29500 \
+  --main_process_port=29502 \
   relight/training/train_controlnet.py \
   --pretrained_model_name_or_path="stable-diffusion-v1-5/stable-diffusion-v1-5" \
   --output_dir="models/controlnet" \
   --train_data_dir="data/train" \
   --validation_data_dir="data/val" \
   --resolution=512 \
-  --learning_rate=1e-3 \
+  --learning_rate=5e-4 \
   --lr_scheduler="cosine" \
   --lr_warmup_steps=0 \
   --train_batch_size=4 \
   --max_train_steps=5000 \
   --validation_steps=500 \
-  --num_validation_images=4'
+  --num_validation_images=4 \
+  --validation_num_inference_steps=50'
     
 # Submit the job
 job_id = slurm.sbatch(train_script)
