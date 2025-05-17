@@ -64,6 +64,7 @@ import numpy as np
 from PIL import Image
                 
 import wandb
+from torchvision import models
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.34.0.dev0")
@@ -225,8 +226,26 @@ class ControlNetTrainConfig:
     allow_tf32: bool = False
 
     # Number of inference steps to use during validation image generation.
-    # Controls the maximum number of denoising steps for validation samples.
+    # Controls the  maximum number of denoising steps for validation samples.
     validation_num_inference_steps: int = 50
+
+    # Loss weights for training
+    
+    # Weight for the Mean Squared Error (MSE) loss component. MSE loss measures the average squared difference
+    # between predicted and target values, heavily penalizing large errors. Default is 1.0 to use MSE as the primary loss.
+    mse_loss_weight: float = 1.0
+
+    # Weight for the Mean Absolute Error (MAE) loss component. MAE loss measures the average absolute difference
+    # between predicted and target values, being more robust to outliers than MSE. Default is 0.0 to disable MAE loss.
+    mae_loss_weight: float = 0.0
+
+    # Weight for the perceptual (VGG) loss component. Perceptual loss uses a pretrained VGG network to compare
+    # high-level features between generated and target images, helping to capture semantic similarities.
+    # Default is 0.0 to disable perceptual loss.
+    perceptual_loss_weight: float = 0.0
+
+    # Number of steps between logging generated/gt image pairs to wandb during training
+    log_training_image_steps: int = 1000
 
     @staticmethod
     def from_args(args) -> ControlNetTrainConfig:
@@ -285,6 +304,10 @@ def log_validation(
     inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
     logger.debug("Using inference context: %s", type(inference_ctx).__name__)
 
+    perceptual_loss_fn = get_vgg_perceptual_loss(accelerator.device)
+    mae_losses = []
+    perceptual_losses = []
+
     for idx, sample in enumerate(validation_dataset):
         logger.debug("Processing validation sample %d/%d", idx + 1, len(validation_dataset))
         control_image_path = os.path.join(config.validation_data_dir, sample['control_file'])
@@ -313,6 +336,17 @@ def log_validation(
             {"images": combined_images}
         )
 
+        # Compute MAE and perceptual loss for each generated image vs target
+        target_tensor = T.ToTensor()(target_image).unsqueeze(0).to(accelerator.device)
+        target_tensor = target_tensor.float()
+        for image in images:
+            gen_tensor = T.ToTensor()(image).unsqueeze(0).to(accelerator.device)
+            gen_tensor = gen_tensor.float()
+            mae = F.l1_loss(gen_tensor, target_tensor).item()
+            perceptual = perceptual_loss_fn(gen_tensor, target_tensor).item()
+            mae_losses.append(mae)
+            perceptual_losses.append(perceptual)
+
     tracker_key = "test" if is_final_validation else "validation"
     logger.info("Logging validation results to trackers")
     for tracker in accelerator.trackers:
@@ -329,7 +363,7 @@ def log_validation(
                 # Create captions for each image
                 captions = ["Target", "Control"]
                 steps_range = np.linspace(10, config.validation_num_inference_steps, config.num_validation_images, dtype=int)
-                captions.extend([f"Generated | steps {int(steps)}" for steps in steps_range])
+                captions.extend([f"Generated | {int(steps)} steps" for steps in steps_range])
                 
                 # Add captions below images
                 captioned_images = []
@@ -350,7 +384,7 @@ def log_validation(
                 formatted_images.append(
                     wandb.Image(concat_image)
                 )
-            tracker.log({tracker_key: formatted_images})
+            tracker.log({tracker_key: formatted_images, tracker_key + "/mae_loss": np.mean(mae_losses), tracker_key + "/perceptual_loss": np.mean(perceptual_losses)})
         else:
             logger.warning(f"image logging not implemented for {tracker.name}")
 
@@ -374,6 +408,25 @@ def collate_fn(examples):
         "pixel_values": pixel_values,
         "conditioning_pixel_values": conditioning_pixel_values,
     }
+
+
+def get_vgg_perceptual_loss(device, resize=True):
+    vgg = models.vgg16(pretrained=True).features[:16].to(device).eval()
+    for param in vgg.parameters():
+        param.requires_grad = False
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
+    def perceptual_loss(x, y):
+        # x, y: [B, 3, H, W], range [0, 1]
+        if resize:
+            x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+            y = F.interpolate(y, size=(224, 224), mode='bilinear', align_corners=False)
+        x = (x - mean) / std
+        y = (y - mean) / std
+        feat_x = vgg(x)
+        feat_y = vgg(y)
+        return F.l1_loss(feat_x, feat_y)
+    return perceptual_loss
 
 
 def main(config: ControlNetTrainConfig):
@@ -694,6 +747,7 @@ def main(config: ControlNetTrainConfig):
     )
 
     image_logs = None
+    perceptual_loss_fn = get_vgg_perceptual_loss(accelerator.device)
     for epoch in range(first_epoch, config.num_train_epochs):
         logger.info(f"Starting epoch {epoch+1}/{config.num_train_epochs}")
         for step, batch in enumerate(train_dataloader):
@@ -748,7 +802,21 @@ def main(config: ControlNetTrainConfig):
                 else:
                     logger.error(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                mse_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+                # MAE loss between generated and ground-truth images
+                # Decode latents to images
+                with torch.no_grad():
+                    generated_images = vae.decode(model_pred / vae.config.scaling_factor).sample
+                    gt_images = vae.decode(target / vae.config.scaling_factor).sample
+                mae_loss = F.l1_loss(generated_images, gt_images)
+                perceptual_loss = perceptual_loss_fn(generated_images, gt_images)
+
+                loss = (
+                    config.mse_loss_weight * mse_loss +
+                    config.mae_loss_weight * mae_loss +
+                    config.perceptual_loss_weight * perceptual_loss
+                )
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -801,7 +869,34 @@ def main(config: ControlNetTrainConfig):
                             global_step,
                         )
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+                    # Log image pairs to wandb every config.log_training_image_steps steps
+                    if (global_step % config.log_training_image_steps == 0) and config.report_to == "wandb":
+                        # Log 5 random pairs from the current batch
+                        num_log = min(5, generated_images.shape[0])
+                        idxs = np.random.choice(generated_images.shape[0], num_log, replace=False)
+                        log_images = []
+                        for i in idxs:
+                            gen_img = generated_images[i].detach().cpu()
+                            gt_img = gt_images[i].detach().cpu()
+                            # Clamp and convert to uint8
+                            gen_img = torch.clamp(gen_img, 0, 1)
+                            gt_img = torch.clamp(gt_img, 0, 1)
+                            gen_img_pil = T.ToPILImage()(gen_img)
+                            gt_img_pil = T.ToPILImage()(gt_img)
+                            # Concatenate side by side
+                            concat = Image.new('RGB', (gen_img_pil.width + gt_img_pil.width, gen_img_pil.height))
+                            concat.paste(gt_img_pil, (0, 0))
+                            concat.paste(gen_img_pil, (gt_img_pil.width, 0))
+                            log_images.append(wandb.Image(concat, caption=f"GT | Generated (step {global_step})"))
+                        accelerator.log({"train/image_pairs": log_images}, step=global_step)
+
+            logs = {
+                "loss": loss.detach().item(),
+                "lr": lr_scheduler.get_last_lr()[0],
+                "weighted_mse_loss": (config.mse_loss_weight * mse_loss).detach().item(),
+                "weighted_mae_loss": (config.mae_loss_weight * mae_loss).detach().item(),
+                "weighted_perceptual_loss": (config.perceptual_loss_weight * perceptual_loss).detach().item(),
+            }
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 

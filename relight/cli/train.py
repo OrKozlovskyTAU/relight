@@ -495,6 +495,34 @@ def parse_args(input_args=None):
         help="Number of inference steps to use during validation image generation.",
     )
 
+    # Loss weights for training
+    parser.add_argument(
+        "--mse_loss_weight",
+        type=float,
+        default=1.0,
+        help="Weight for the MSE loss component.",
+    )
+    parser.add_argument(
+        "--mae_loss_weight",
+        type=float,
+        default=0.0,
+        help="Weight for the MAE loss component.",
+    )
+    parser.add_argument(
+        "--perceptual_loss_weight",
+        type=float,
+        default=0.0,
+        help="Weight for the perceptual (VGG) loss component.",
+    )
+
+    # Additional arguments from train_controlnet_flux.py
+    parser.add_argument(
+        "--log_training_image_steps",
+        type=int,
+        default=1000,
+        help="Number of steps between logging generated/gt image pairs to wandb during training.",
+    )
+
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:
