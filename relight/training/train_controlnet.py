@@ -794,6 +794,12 @@ def main(config: ControlNetTrainConfig):
                     return_dict=False,
                 )[0]
 
+                # Reconstruct x0 from noisy_latents and predicted noise
+                alphas_cumprod = noise_scheduler.alphas_cumprod.to(noisy_latents.device)
+                sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[timesteps]).view(-1, 1, 1, 1)
+                sqrt_one_minus_alphas_cumprod = torch.sqrt(1 - alphas_cumprod[timesteps]).view(-1, 1, 1, 1)
+                x0_recon = (noisy_latents - sqrt_one_minus_alphas_cumprod * model_pred) / sqrt_alphas_cumprod
+
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
@@ -804,13 +810,12 @@ def main(config: ControlNetTrainConfig):
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                 mse_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
-                # MAE loss between generated and ground-truth images
+                # MAE loss between reconstructed and ground-truth images
                 # Decode latents to images
                 with torch.no_grad():
-                    generated_images = vae.decode(model_pred / vae.config.scaling_factor).sample
-                    gt_images = vae.decode(target / vae.config.scaling_factor).sample
-                mae_loss = F.l1_loss(generated_images, gt_images)
-                perceptual_loss = perceptual_loss_fn(generated_images, gt_images)
+                    generated_images = vae.decode(x0_recon / vae.config.scaling_factor).sample
+                mae_loss = F.l1_loss(generated_images, batch["pixel_values"])
+                perceptual_loss = perceptual_loss_fn(generated_images, batch["pixel_values"])
 
                 loss = (
                     config.mse_loss_weight * mse_loss +
@@ -870,14 +875,41 @@ def main(config: ControlNetTrainConfig):
                         )
 
                     # Log image pairs to wandb every config.log_training_image_steps steps
-                    if (global_step % config.log_training_image_steps == 0) and config.report_to == "wandb":
-                        # Log 5 random pairs from the current batch
-                        num_log = min(5, generated_images.shape[0])
-                        idxs = np.random.choice(generated_images.shape[0], num_log, replace=False)
+                    if (global_step % config.log_training_image_steps == 0 or global_step == 1) and config.report_to == "wandb":
+                        logger.info(f"Logging training image pairs at step {global_step}")
+                        # Calculate per-sample losses
+                        sample_losses = []
+                        for i in range(model_pred.shape[0]):
+                            pred = model_pred[i]
+                            tgt = target[i]
+                            sample_mse = (F.mse_loss(pred.float(), tgt.float(), reduction='mean') * config.mse_loss_weight).item()
+                            # For MAE and perceptual, keep using generated_images and batch["pixel_values"]
+                            gen = generated_images[i]
+                            gt = batch["pixel_values"][i]
+                            sample_mae = (F.l1_loss(gen, gt, reduction='mean') * config.mae_loss_weight).item()
+                            sample_perceptual = perceptual_loss_fn(gen.unsqueeze(0), gt.unsqueeze(0)) * config.perceptual_loss_weight
+                            sample_perceptual = sample_perceptual.item()
+                            total_loss = sample_mse + sample_mae + sample_perceptual
+                            sample_losses.append((total_loss, i))
+
+                        # Sort by loss and get indices for min, avg and max loss samples
+                        sample_losses.sort(key=lambda x: x[0])
+                        num_samples = len(sample_losses)
+                        idxs = [
+                            sample_losses[0][1],  # min loss
+                            sample_losses[1][1],  # second min loss
+                            sample_losses[num_samples//2-1][1],  # avg loss
+                            sample_losses[num_samples//2][1],    # avg loss
+                            sample_losses[-2][1], # second max loss
+                            sample_losses[-1][1]  # max loss
+                        ]
+
                         log_images = []
                         for i in idxs:
                             gen_img = generated_images[i].detach().cpu()
-                            gt_img = gt_images[i].detach().cpu()
+                            gen_img = (gen_img + 1) / 2 # denormalize from [-1,1] to [0,1]
+                            gt_img = batch["pixel_values"][i].detach().cpu()
+                            gt_img = (gt_img + 1) / 2 # denormalize from [-1,1] to [0,1]
                             # Clamp and convert to uint8
                             gen_img = torch.clamp(gen_img, 0, 1)
                             gt_img = torch.clamp(gt_img, 0, 1)
@@ -887,8 +919,28 @@ def main(config: ControlNetTrainConfig):
                             concat = Image.new('RGB', (gen_img_pil.width + gt_img_pil.width, gen_img_pil.height))
                             concat.paste(gt_img_pil, (0, 0))
                             concat.paste(gen_img_pil, (gt_img_pil.width, 0))
-                            log_images.append(wandb.Image(concat, caption=f"GT | Generated (step {global_step})"))
+                            timestep = timesteps[i].item()
+                            # Calculate individual losses for this sample
+                            pred = model_pred[i]
+                            tgt = target[i]
+                            mse = (F.mse_loss(pred.float(), tgt.float(), reduction='mean') * config.mse_loss_weight).item()
+                            gen = generated_images[i]
+                            gt = batch["pixel_values"][i]
+                            mae = (F.l1_loss(gen, gt, reduction='mean') * config.mae_loss_weight).item()
+                            perc = perceptual_loss_fn(gen.unsqueeze(0), gt.unsqueeze(0)) * config.perceptual_loss_weight
+                            perc = perc.item()
+                            total = mse + mae + perc
+                            # Determine loss type for caption
+                            idx_type = idxs.index(i)
+                            if idx_type < 2:
+                                loss_type = "min"
+                            elif idx_type < 4:
+                                loss_type = "avg"
+                            else:
+                                loss_type = "max"
+                            log_images.append(wandb.Image(concat, caption=f"GT | Generated (t={timestep}, {loss_type} total_loss={total:.4f}, mse={mse:.4f}, mae={mae:.4f}, perceptual={perc:.4f})"))
                         accelerator.log({"train/image_pairs": log_images}, step=global_step)
+                        logger.info("Successfully logged training image pairs")
 
             logs = {
                 "loss": loss.detach().item(),
