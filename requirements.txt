@@ -13,4 +13,5 @@ ftfy
 tensorboard
 Jinja2
 wandb
-simple_slurm 
+simple_slurm
+plotly>=5.0.0 

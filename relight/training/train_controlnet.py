@@ -65,6 +65,11 @@ from PIL import Image
                 
 import wandb
 from torchvision import models
+import plotly.graph_objs as go
+import plotly.io as pio
+import tempfile
+import pickle
+import time
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.34.0.dev0")
@@ -182,6 +187,9 @@ class ControlNetTrainConfig:
     # Allows for qualitative assessment of model performance.
     num_validation_images: int = 4
 
+    # Number of validation samples to use from the validation dataset. If None, use all.
+    max_validation_samples: Optional[int] = None
+
     # Number of training steps between validation runs.
     # Validation will be performed every N steps.
     validation_steps: int = 200
@@ -247,6 +255,9 @@ class ControlNetTrainConfig:
     # Number of steps between logging generated/gt image pairs to wandb during training
     log_training_image_steps: int = 1000
 
+    # Number of steps between logging gradients and weights to wandb during training
+    log_grad_and_weights_steps: int = 100
+
     @staticmethod
     def from_args(args) -> ControlNetTrainConfig:
         # Only keep keys that are fields of ControlNetTrainConfig
@@ -308,7 +319,10 @@ def log_validation(
     mae_losses = []
     perceptual_losses = []
 
+    max_samples = config.max_validation_samples if config.max_validation_samples is not None else len(validation_dataset)
     for idx, sample in enumerate(validation_dataset):
+        if idx >= max_samples:
+            break
         logger.debug("Processing validation sample %d/%d", idx + 1, len(validation_dataset))
         control_image_path = os.path.join(config.validation_data_dir, sample['control_file'])
         target_image_path = os.path.join(config.validation_data_dir, sample['target_file'])
@@ -748,6 +762,12 @@ def main(config: ControlNetTrainConfig):
 
     image_logs = None
     perceptual_loss_fn = get_vgg_perceptual_loss(accelerator.device)
+
+    # For tracking gradients and weights norms per layer per step
+    grad_norms_per_layer = {}
+    weight_norms_per_layer = {}
+    steps_tracked = []
+
     for epoch in range(first_epoch, config.num_train_epochs):
         logger.info(f"Starting epoch {epoch+1}/{config.num_train_epochs}")
         for step, batch in enumerate(train_dataloader):
@@ -827,6 +847,29 @@ def main(config: ControlNetTrainConfig):
                 if accelerator.sync_gradients:
                     params_to_clip = controlnet.parameters()
                     accelerator.clip_grad_norm_(params_to_clip, config.max_grad_norm)
+                
+                # Log gradients and weights
+                if (global_step % config.log_grad_and_weights_steps == 0 or global_step == 0) and config.report_to == "wandb":
+                    total_grad_norm = 0.0
+                    num_params = 0
+                    for name, param in controlnet.named_parameters():
+                        if param.requires_grad and param.grad is not None:
+                            grad_norm = param.grad.norm().item()
+                            total_grad_norm += abs(grad_norm)
+                            # Track for plotting
+                            if name not in grad_norms_per_layer:
+                                grad_norms_per_layer[name] = []
+                            grad_norms_per_layer[name].append(grad_norm)
+                            if name not in weight_norms_per_layer:
+                                weight_norms_per_layer[name] = []
+                            weight_norms_per_layer[name].append(param.data.norm().item())
+                            num_params += 1
+                    steps_tracked.append(global_step)
+                    if num_params > 0:
+                        wandb.log({
+                            "gradients/total_gradients_norm": total_grad_norm / num_params
+                        }, step=global_step)
+
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=config.set_grads_to_none)
@@ -897,15 +940,13 @@ def main(config: ControlNetTrainConfig):
                         num_samples = len(sample_losses)
                         idxs = [
                             sample_losses[0][1],  # min loss
-                            sample_losses[1][1],  # second min loss
-                            sample_losses[num_samples//2-1][1],  # avg loss
                             sample_losses[num_samples//2][1],    # avg loss
-                            sample_losses[-2][1], # second max loss
                             sample_losses[-1][1]  # max loss
                         ]
+                        loss_types = ["min", "avg", "max"]
 
                         log_images = []
-                        for i in idxs:
+                        for i, loss_type in zip(idxs, loss_types):
                             gen_img = generated_images[i].detach().cpu()
                             gen_img = (gen_img + 1) / 2 # denormalize from [-1,1] to [0,1]
                             gt_img = batch["pixel_values"][i].detach().cpu()
@@ -930,15 +971,7 @@ def main(config: ControlNetTrainConfig):
                             perc = perceptual_loss_fn(gen.unsqueeze(0), gt.unsqueeze(0)) * config.perceptual_loss_weight
                             perc = perc.item()
                             total = mse + mae + perc
-                            # Determine loss type for caption
-                            idx_type = idxs.index(i)
-                            if idx_type < 2:
-                                loss_type = "min"
-                            elif idx_type < 4:
-                                loss_type = "avg"
-                            else:
-                                loss_type = "max"
-                            log_images.append(wandb.Image(concat, caption=f"GT | Generated (t={timestep}, {loss_type} total_loss={total:.4f}, mse={mse:.4f}, mae={mae:.4f}, perceptual={perc:.4f})"))
+                            log_images.append(wandb.Image(concat, caption=f"GT | Generated {i} (t={timestep}, {loss_type} total_loss={total:.4f}, mse={mse:.4f}, mae={mae:.4f}, perceptual={perc:.4f})"))
                         accelerator.log({"train/image_pairs": log_images}, step=global_step)
                         logger.info("Successfully logged training image pairs")
 
@@ -955,6 +988,36 @@ def main(config: ControlNetTrainConfig):
             if global_step >= config.max_train_steps:
                 logger.info("Reached max training steps. Ending training loop.")
                 break
+
+    # --- PLOTLY 3D PLOTS AND WANDB LOGGING ---
+    if accelerator.is_main_process and config.report_to == "wandb":
+        # Save data for debugging
+        debug_data_path = os.path.join(config.output_dir, 'plotly_debug_latest.pkl')  # Hardcoded for consistency with plotly_debug_plot.py
+        with open(debug_data_path, 'wb') as f:
+            pickle.dump({
+                'steps_tracked': steps_tracked,
+                'grad_norms_per_layer': grad_norms_per_layer,
+                'weight_norms_per_layer': weight_norms_per_layer
+            }, f)
+        # Prepare data for 3D plots
+        layer_names = list(grad_norms_per_layer.keys())
+        steps = steps_tracked
+        # Gradients norm plot
+        grad_norm_matrix = [grad_norms_per_layer[name] for name in layer_names]
+        grad_norm_fig = go.Figure(data=[go.Surface(z=grad_norm_matrix, x=steps, y=layer_names)])
+        grad_norm_fig.update_layout(title='Gradients Norm per Layer per Step', scene=dict(
+            xaxis_title='Step', yaxis_title='Layer', zaxis_title='Grad Norm'))
+        grad_html_path = os.path.join(config.output_dir, 'gradients_norm_per_layer_per_step.html')
+        pio.write_html(grad_norm_fig, grad_html_path)
+        wandb.log({"plots/gradients_norm_per_layer_per_step": wandb.Html(grad_html_path)})
+        # Weights norm plot
+        weight_norm_matrix = [weight_norms_per_layer[name] for name in layer_names]
+        weight_norm_fig = go.Figure(data=[go.Surface(z=weight_norm_matrix, x=steps, y=layer_names)])
+        weight_norm_fig.update_layout(title='Weights Norm per Layer per Step', scene=dict(
+            xaxis_title='Step', yaxis_title='Layer', zaxis_title='Weight Norm'))
+        weight_html_path = os.path.join(config.output_dir, 'weights_norm_per_layer_per_step.html')
+        pio.write_html(weight_norm_fig, weight_html_path)
+        wandb.log({"plots/weights_norm_per_layer_per_step": wandb.Html(weight_html_path)})
 
     # Create the pipeline using the trained modules and save it.
     logger.info("Waiting for all processes to finish before saving final model.")

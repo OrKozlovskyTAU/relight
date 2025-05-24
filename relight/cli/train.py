@@ -283,7 +283,13 @@ def parse_args(input_args=None):
         "--num_validation_images",
         type=int,
         default=4,
-        help="Number of images that should be generated during validation",
+        help="Number of images to generate per validation sample during evaluation.",
+    )
+    parser.add_argument(
+        "--max_validation_samples",
+        type=int,
+        default=None,
+        help="Maximum number of validation samples to use from the validation dataset. If not set, use all.",
     )
     parser.add_argument(
         "--validation_epochs",
@@ -521,6 +527,12 @@ def parse_args(input_args=None):
         type=int,
         default=1000,
         help="Number of steps between logging generated/gt image pairs to wandb during training.",
+    )
+    parser.add_argument(
+        "--log_grad_and_weights_steps",
+        type=int,
+        default=100,
+        help="Number of steps between logging gradients and weights to wandb during training.",
     )
 
     if input_args is not None:
