@@ -70,6 +70,7 @@ import plotly.io as pio
 import tempfile
 import pickle
 import time
+from plotly.subplots import make_subplots
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.34.0.dev0")
@@ -832,8 +833,7 @@ def main(config: ControlNetTrainConfig):
 
                 # MAE loss between reconstructed and ground-truth images
                 # Decode latents to images
-                with torch.no_grad():
-                    generated_images = vae.decode(x0_recon / vae.config.scaling_factor).sample
+                generated_images = vae.decode(x0_recon / vae.config.scaling_factor).sample
                 mae_loss = F.l1_loss(generated_images, batch["pixel_values"])
                 perceptual_loss = perceptual_loss_fn(generated_images, batch["pixel_values"])
 
@@ -991,33 +991,73 @@ def main(config: ControlNetTrainConfig):
 
     # --- PLOTLY 3D PLOTS AND WANDB LOGGING ---
     if accelerator.is_main_process and config.report_to == "wandb":
-        # Save data for debugging
-        debug_data_path = os.path.join(config.output_dir, 'plotly_debug_latest.pkl')  # Hardcoded for consistency with plotly_debug_plot.py
-        with open(debug_data_path, 'wb') as f:
-            pickle.dump({
-                'steps_tracked': steps_tracked,
-                'grad_norms_per_layer': grad_norms_per_layer,
-                'weight_norms_per_layer': weight_norms_per_layer
-            }, f)
-        # Prepare data for 3D plots
+
+        def get_group_name(layer_name):
+            parts = layer_name.split('.')
+            if parts[0] == 'module':
+                if parts[1].startswith('controlnet'):
+                    return 'controlnet'
+                elif parts[1] in ['conv_in', 'down_blocks', 'mid_block']:
+                    return 'main_model'
+                else:
+                    return None  # Exclude other modules
+            return None
+
+        def plot_norms_by_group(norms_per_layer, steps, layer_names, title, html_path):
+            # Filter out bias layers
+            filtered_layer_names = [name for name in layer_names if not name.endswith('.bias')]
+            groups = {'main_model': [], 'controlnet': []}
+            for name in filtered_layer_names:
+                group = get_group_name(name)
+                if group in groups:
+                    groups[group].append(name)
+            # Only keep non-empty groups
+            groups = {k: v for k, v in groups.items() if v}
+            rows = 1
+            cols = 2
+            fig = make_subplots(
+                rows=rows, cols=cols,
+                specs=[[{'type': 'surface'}]*cols],
+                subplot_titles=[k.replace('_', ' ').title() for k in groups.keys()]
+            )
+            for i, (group, names) in enumerate(groups.items()):
+                row = 1
+                col = i + 1
+                norm_matrix = [norms_per_layer[n] for n in names]
+                fig.add_trace(
+                    go.Surface(z=norm_matrix, x=steps, y=names, showscale=False),
+                    row=row, col=col
+                )
+                # Set axis titles for each subplot
+                fig.update_scenes(
+                    dict(
+                        xaxis_title='Step',
+                        yaxis_title='Layer',
+                        zaxis_title='Norm',
+                    ),
+                    row=row, col=col
+                )
+            fig.update_layout(
+                title=title,
+            )
+            pio.write_html(fig, html_path)
+            wandb.log({f"plots/{os.path.basename(html_path)}": wandb.Html(html_path)})
+            print(f"Saved plot to {html_path}")
+
         layer_names = list(grad_norms_per_layer.keys())
         steps = steps_tracked
-        # Gradients norm plot
-        grad_norm_matrix = [grad_norms_per_layer[name] for name in layer_names]
-        grad_norm_fig = go.Figure(data=[go.Surface(z=grad_norm_matrix, x=steps, y=layer_names)])
-        grad_norm_fig.update_layout(title='Gradients Norm per Layer per Step', scene=dict(
-            xaxis_title='Step', yaxis_title='Layer', zaxis_title='Grad Norm'))
-        grad_html_path = os.path.join(config.output_dir, 'gradients_norm_per_layer_per_step.html')
-        pio.write_html(grad_norm_fig, grad_html_path)
-        wandb.log({"plots/gradients_norm_per_layer_per_step": wandb.Html(grad_html_path)})
-        # Weights norm plot
-        weight_norm_matrix = [weight_norms_per_layer[name] for name in layer_names]
-        weight_norm_fig = go.Figure(data=[go.Surface(z=weight_norm_matrix, x=steps, y=layer_names)])
-        weight_norm_fig.update_layout(title='Weights Norm per Layer per Step', scene=dict(
-            xaxis_title='Step', yaxis_title='Layer', zaxis_title='Weight Norm'))
-        weight_html_path = os.path.join(config.output_dir, 'weights_norm_per_layer_per_step.html')
-        pio.write_html(weight_norm_fig, weight_html_path)
-        wandb.log({"plots/weights_norm_per_layer_per_step": wandb.Html(weight_html_path)})
+        # Gradients norm plot by group
+        grad_html_path = os.path.join(config.output_dir, 'gradients_norm.html')
+        plot_norms_by_group(
+            grad_norms_per_layer, steps, layer_names,
+            'Gradients Norm per Layer per Step', grad_html_path
+        )
+        # Weights norm plot by group
+        weight_html_path = os.path.join(config.output_dir, 'weights_norm.html')
+        plot_norms_by_group(
+            weight_norms_per_layer, steps, layer_names,
+            'Weights Norm per Layer per Step', weight_html_path
+        )
 
     # Create the pipeline using the trained modules and save it.
     logger.info("Waiting for all processes to finish before saving final model.")
