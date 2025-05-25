@@ -47,15 +47,15 @@ train_script = 'accelerate launch \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
   --train_batch_size=4 \
-  --max_train_steps=100 \
-  --validation_steps=10 \
+  --max_train_steps=10000 \
+  --validation_steps=1000 \
   --num_validation_images=3 \
   --validation_num_inference_steps=50 \
   --mse_loss_weight=0.0 \
   --mae_loss_weight=1.0 \
   --perceptual_loss_weight=0.0 \
   --log_training_image_steps=1000 \
-  --log_grad_and_weights_steps=10'
+  --log_grad_and_weights_steps=1000'
     
 # Submit the job
 job_id = slurm.sbatch(train_script)
