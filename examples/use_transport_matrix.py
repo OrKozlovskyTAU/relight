@@ -15,7 +15,7 @@ import sys
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
-from relight.core.transport_matrix import load_transport_matrix
+from relight.dataset.transport_matrix import load_transport_matrix
 from relight.utils.blender_utils import (
     get_scene_resolution,
     load_texture,

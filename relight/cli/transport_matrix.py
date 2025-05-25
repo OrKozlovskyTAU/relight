@@ -9,7 +9,7 @@ import argparse
 import bpy
 from pathlib import Path
 
-from relight.core.transport_matrix import (
+from relight.dataset.transport_matrix import (
     generate_transport_matrix,
     calculate_transport_matrix,
     save_transport_matrix,

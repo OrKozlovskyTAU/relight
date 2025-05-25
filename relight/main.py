@@ -22,13 +22,13 @@ if os.path.exists(site_packages):
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
-from relight.core.transport_matrix import (
+from relight.dataset.transport_matrix import (
     generate_transport_matrix,
     calculate_transport_matrix,
     save_transport_matrix,
     load_transport_matrix
 )
-from relight.core.random_light_dataset import generate_random_light_dataset
+from relight.dataset.random_light_dataset import generate_random_light_dataset
 
 
 def parse_args():

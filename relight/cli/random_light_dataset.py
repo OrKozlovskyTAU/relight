@@ -8,7 +8,7 @@ This script provides a command-line interface for generating random light datase
 import argparse
 import bpy
 
-from relight.core.random_light_dataset import generate_random_light_dataset
+from relight.dataset.random_light_dataset import generate_random_light_dataset
 
 
 def parse_args():

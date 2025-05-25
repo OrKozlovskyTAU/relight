@@ -22,7 +22,7 @@ if os.path.exists(site_packages):
     sys.path.append(site_packages)
 
 
-from relight.core.random_light_dataset import generate_random_light_dataset
+from relight.dataset.random_light_dataset import generate_random_light_dataset
 
 
 def parse_args():
