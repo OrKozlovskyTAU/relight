@@ -32,3 +32,5 @@ wandb
 *.jpg
 *.jpeg
 *.gif
+*.log
+*.html
