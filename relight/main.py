@@ -28,7 +28,7 @@ from relight.dataset.transport_matrix import (
     save_transport_matrix,
     load_transport_matrix
 )
-from relight.dataset.random_light_dataset import generate_random_light_dataset
+from relight.dataset.light_dataset import generate_light_dataset
 
 
 def parse_args():
@@ -128,7 +128,7 @@ def main():
     
     elif args.command == "dataset":
         # Generate random light dataset
-        generate_random_light_dataset(
+        generate_light_dataset(
             start_index=args.start_index,
             n_images=args.n_images,
             use_gpu=not args.no_gpu,

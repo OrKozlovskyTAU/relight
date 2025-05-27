@@ -2,7 +2,7 @@ import bpy
 from pathlib import Path
 import numpy as np
 from PIL import Image
-from mathutils import Vector
+from mathutils import Vector, Matrix
 
 
 def get_active_object():
@@ -146,4 +146,23 @@ def setup_gpu_rendering():
         return True
     else:
         print("No GPU devices found. Using CPU rendering.")
-        return False 
+        return False
+
+
+def get_area_light_size(light_obj):
+    # Returns (size_x, size_y) for area light
+    size_x = getattr(light_obj.data, 'size', 0.0)
+    size_y = getattr(light_obj.data, 'size_y', size_x)
+    return size_x, size_y
+
+
+def orient_area_light_toward_bbox(light_obj, bbox_center):
+    # Orient the area light so its normal points toward bbox_center
+    direction = Vector(bbox_center) - light_obj.location
+    direction.normalize()
+    # Default area light normal is (0, 0, -1) in local space
+    up = Vector((0, 1, 0))
+    normal = direction
+    # Compute rotation matrix to align -Z to normal
+    rot = normal.to_track_quat('-Z', 'Y').to_matrix().to_4x4()
+    light_obj.matrix_world = Matrix.Translation(light_obj.location) @ rot 

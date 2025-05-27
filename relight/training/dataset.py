@@ -12,22 +12,19 @@ from PIL import Image
 import torchvision.transforms as transforms
 import logging
 from pathlib import Path
+import csv
 
 logger = logging.getLogger(__name__)
 
 class RelightDataset(Dataset):
     """
     Dataset for loading pairs of control and target images for training.
-    
-    This dataset loads control images and target images from the same directory
-    with specific naming patterns:
-    - Target images: XXXXX_render_00000.jpg
-    - Control images: XXXXX_diffdir_00000.jpg
-    where XXXXX is a 5-digit index starting from 0.
+    Supports loading from a CSV file that specifies the subset to use.
     """
     
     def __init__(self, 
                  data_dir: str,
+                 subset_size: int,
                  control_transform: Optional[transforms.Compose] = None,
                  target_transform: Optional[transforms.Compose] = None,
                  image_size: int = 512,
@@ -36,7 +33,8 @@ class RelightDataset(Dataset):
         Initialize the dataset.
         
         Args:
-            data_dir: Directory containing both control and target images
+            data_dir: Directory containing both control and target images and CSVs
+            subset_size: Number of images in the subset to load (e.g., 1000 for light_positions_1000.csv)
             control_transform: Transform to apply to control images
             target_transform: Transform to apply to target images
             image_size: Size to resize images to
@@ -44,6 +42,15 @@ class RelightDataset(Dataset):
         """
         self.data_dir = Path(data_dir)
         self.image_size = image_size
+        self.subset_size = subset_size
+        csv_path = self.data_dir / f"light_positions_{subset_size}.csv"
+        if not csv_path.exists():
+            raise ValueError(f"Subset CSV {csv_path} not found.")
+        with open(csv_path, 'r', newline='') as f:
+            reader = csv.DictReader(f)
+            self.entries = list(reader)
+        if not self.entries:
+            raise ValueError(f"No entries found in {csv_path}")
         
         # Default transforms if none provided
         if control_transform is None:
@@ -66,17 +73,11 @@ class RelightDataset(Dataset):
         
         self.control_transform = control_transform
         self.target_transform = target_transform
-        
-        # Get list of target image files
-        self.image_files = sorted([f for f in self.data_dir.glob("*_render_0000.png")])
-        if not self.image_files:
-            raise ValueError(f"No target image files found in {data_dir}")
-                
-        logger.info(f"Loaded {len(self.image_files)} image pairs")
+        logger.info(f"Loaded {len(self.entries)} image pairs from {csv_path}")
     
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
-        return len(self.image_files)
+        return len(self.entries)
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
@@ -88,26 +89,24 @@ class RelightDataset(Dataset):
         Returns:
             Dictionary containing control and target images
         """
-        # Get base filename (XXXXX)
-        target_path = self.image_files[idx]
-        base_name = target_path.stem.split('_')[0]
-        
-        # Construct control image path
-        control_path = self.data_dir / f"{base_name}_diffdir_0000.png"
-        
+        entry = self.entries[idx]
+        # The 'index' field in the CSV is the image base name (e.g., '00001_render_')
+        base_name = entry['index'].replace('_render_', '')
+        # Compose file names
+        target_path = self.data_dir / f"{base_name}_render_.png"
+        control_path = self.data_dir / f"{base_name}_diffdir_.png"
         # Load images
         control_image = Image.open(control_path).convert("RGB")
         target_image = Image.open(target_path).convert("RGB")
-        
         # Apply transforms
         control_image = self.control_transform(control_image)
         target_image = self.target_transform(target_image)
-            
         return {
             'conditioning_pixel_values': control_image,
             'pixel_values': target_image,
             'control_file': control_path.name,
-            'target_file': target_path.name
+            'target_file': target_path.name,
+            'meta': entry
         }
 
 

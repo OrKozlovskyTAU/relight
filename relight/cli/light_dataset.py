@@ -1,40 +1,38 @@
 #!/usr/bin/env python
 """
-Example: Generating Random Light Dataset
+Light Dataset CLI
 
-This script demonstrates how to generate a dataset of random light positions in a scene.
+This script provides a command-line interface for generating light datasets (train and validation) with configurable light sources.
 """
 
-import bpy
 import os
 import argparse
 from pathlib import Path
-
-# Add the project root to the Python path
 import sys
-project_root = Path(__file__).parent.parent
-sys.path.append(str(project_root))
 
-# Add the conda environment path
+# Add relight source directory to PYTHONPATH
+repo_root = '/home/dcor/orkozlovsky/repos/relight/'
+os.environ['PYTHONPATH'] = repo_root + ':' + os.environ.get('PYTHONPATH', '')
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+# Add the conda environment path (optional, as in the example)
 site_packages = os.path.join('/home/dcor/orkozlovsky/miniconda3/envs/relight_blender/', 'lib', 'python3.10', 'site-packages')
 if os.path.exists(site_packages):
     print(f"Adding {site_packages} to sys.path")
     sys.path.append(site_packages)
 
-
 from relight.dataset.light_dataset import generate_light_dataset, LightSourceConfiguration
-
 
 def parse_args():
     """Parse command line arguments."""
-    # Get the script arguments, ignoring Blender's arguments
     argv = sys.argv
     if "--" in argv:
         argv = argv[argv.index("--") + 1:]
     else:
         argv = []
 
-    parser = argparse.ArgumentParser(description="Example: Generating Light Dataset with Grid and Validation")
+    parser = argparse.ArgumentParser(description="Light Dataset CLI")
     parser.add_argument("--N", type=int, default=10, help="Number of grid points per axis for the train set (N x N x N)")
     parser.add_argument("--Y", type=int, default=20, help="Number of random validation images")
     parser.add_argument("--no-gpu", action="store_true", help="Don't use GPU rendering")
@@ -43,25 +41,23 @@ def parse_args():
     # Optionally: add arguments for light source config, or use a hardcoded example
     return parser.parse_args(argv)
 
-
 def main():
     """Main function."""
     args = parse_args()
     output_dir = Path(args.output_dir)
-    # Update all render nodes to use the new output directory
-    for node in bpy.data.scenes["Scene"].node_tree.nodes:
-        if hasattr(node, "base_path"):
-            node.base_path = str(output_dir)
 
     # Example: define light sources (customize as needed)
     light_sources = [
+        # LightSourceConfiguration(
+        #     name="Point",
+        #     powers=[1, 1.5, 2],
+        #     mode="interior",
+        # ),
         LightSourceConfiguration(
-            name="Point",
+            name="Area1",
             powers=[1, 1.5, 2],
-            mode="interior",
-            num_of_images=args.N ** 3
-        ),
-        # Add more LightSourceConfiguration objects as needed
+            mode="faces",
+        )
     ]
 
     # Generate the light dataset
@@ -75,7 +71,6 @@ def main():
     )
 
     print(f"Generated train and validation sets with N={args.N}, Y={args.Y}")
-
 
 if __name__ == "__main__":
     main() 
