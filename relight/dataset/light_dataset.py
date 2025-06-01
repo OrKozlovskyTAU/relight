@@ -1,18 +1,18 @@
 import bpy
 import numpy as np
-from mathutils import Vector, Matrix
-import math
+from mathutils import Vector
 import csv
-from pathlib import Path
 import os
 import random
 import logging
 
 from relight.utils.blender_utils import (
-    set_default_scene,
     setup_gpu_rendering,
     get_area_light_size,
-    orient_area_light_toward_bbox
+    orient_area_light_toward_point,
+    get_object_bbox_center_and_corners,
+    get_cornell_faces,
+    get_facing_point,
 )
 from relight.utils.blender_plotly_vis import plot_light_positions_with_scene
 
@@ -21,7 +21,8 @@ logging.basicConfig(
     filename='light_dataset.log',
     filemode='w',
     format='%(asctime)s %(levelname)s:%(message)s',
-    level=logging.DEBUG
+    level=logging.DEBUG,
+    force=True
 )
 logger = logging.getLogger(__name__)
 
@@ -75,12 +76,13 @@ def get_adjusted_ranges(light_obj, x_range, y_range, z_range):
         x_range_area = [x_range[0] + size_x/2, x_range[1] - size_x/2]
         y_range_area = [y_range[0] + size_y/2, y_range[1] - size_y/2]
         z_range_area = z_range  # Assuming area light is flat in XY, adjust if needed
-        return x_range_area, y_range_area, z_range_area, True
-    return x_range, y_range, z_range, False
+        return x_range_area, y_range_area, z_range_area
+    return x_range, y_range, z_range
 
 
 def generate_light_grid_positions(light_obj, grid_size, mode, x_range, y_range, z_range, filter_valid_positions):
-    x_r, y_r, z_r, is_area = get_adjusted_ranges(light_obj, x_range, y_range, z_range)
+    # x_r, y_r, z_r = get_adjusted_ranges(light_obj, x_range, y_range, z_range) # TODO: uncomment this
+    x_r, y_r, z_r = x_range, y_range, z_range
     x_points = np.linspace(x_r[0], x_r[1], grid_size)
     y_points = np.linspace(y_r[0], y_r[1], grid_size)
     z_points = np.linspace(z_r[0], z_r[1], grid_size)
@@ -106,7 +108,7 @@ def generate_light_grid_positions(light_obj, grid_size, mode, x_range, y_range, 
 
 
 def generate_light_random_positions(light_obj, mode, n, x_range, y_range, z_range, filter_valid_positions):
-    x_r, y_r, z_r, is_area = get_adjusted_ranges(light_obj, x_range, y_range, z_range)
+    x_r, y_r, z_r = get_adjusted_ranges(light_obj, x_range, y_range, z_range)
     if mode == "interior":
         positions = []
         while len(positions) < n:
@@ -147,52 +149,32 @@ def generate_light_random_positions(light_obj, mode, n, x_range, y_range, z_rang
         raise ValueError(f"Unknown mode: {mode}")
 
 
-def set_light_position_and_orientation(light_obj, pos, bbox_center, cornell_box=None, x_range=None, y_range=None, z_range=None):
+def set_light_position_and_orientation(light_obj, pos, facing_point):
     light_obj.location = pos
     is_area = light_obj and light_obj.type == 'LIGHT' and light_obj.data.type == 'AREA'
     if is_area:
-        orient_area_light_toward_bbox(light_obj, bbox_center)
-        # Only proceed if all required info is provided
-        if cornell_box is not None and x_range is not None and y_range is not None and z_range is not None:
-            # Check if the light is on a face
-            eps = 1e-4
-            x, y, z = pos
-            face = None
-            if abs(x - x_range[0]) < eps:
-                face = ('x', x_range[0], Vector((1, 0, 0)))
-            elif abs(x - x_range[1]) < eps:
-                face = ('x', x_range[1], Vector((-1, 0, 0)))
-            elif abs(y - y_range[0]) < eps:
-                face = ('y', y_range[0], Vector((0, 1, 0)))
-            elif abs(y - y_range[1]) < eps:
-                face = ('y', y_range[1], Vector((0, -1, 0)))
-            elif abs(z - z_range[0]) < eps:
-                face = ('z', z_range[0], Vector((0, 0, 1)))
-            elif abs(z - z_range[1]) < eps:
-                face = ('z', z_range[1], Vector((0, 0, -1)))
-            # Check intersection with cornell_box
-            if face is not None:
-                # Use inside_mesh to check if any of the area light's corners are inside cornell_box
-                size_x, _ = get_area_light_size(light_obj)
-                size_y = size_x 
-                # Area light is in its local XY plane, centered at pos
-                # Get 4 corners in local space
-                local_corners = [
-                    Vector(( size_x/2,  size_y/2, 0)),
-                    Vector((-size_x/2,  size_y/2, 0)),
-                    Vector((-size_x/2, -size_y/2, 0)),
-                    Vector(( size_x/2, -size_y/2, 0)),
-                ]
-                # Transform to world space
-                world_corners = [light_obj.matrix_world @ c for c in local_corners]
-                intersects = any(inside_mesh(c.x, c.y, c.z, cornell_box) for c in world_corners)
-                if intersects:
-                    # Rotate the area light to be parallel to the face, pointing inward
-                    # Set normal to face[2] (inward direction)
-                    inward_normal = face[2]
-                    up = Vector((0, 1, 0)) if abs(inward_normal.y) < 0.99 else Vector((1, 0, 0))
-                    rot = inward_normal.to_track_quat('-Z', 'Y').to_matrix().to_4x4()
-                    light_obj.matrix_world = Matrix.Translation(light_obj.location) @ rot
+        orient_area_light_toward_point(light_obj, facing_point)
+        # Compute corners using the object's size and orientation (not bound_box)
+        size_x, _ = get_area_light_size(light_obj)
+        size_y = size_x  # Assume square
+        local_corners = np.array([
+            [-size_x/2, -size_y/2, 0],
+            [ size_x/2, -size_y/2, 0],
+            [ size_x/2,  size_y/2, 0],
+            [-size_x/2,  size_y/2, 0],
+            [-size_x/2, -size_y/2, 0],  # close loop
+        ])
+        corners = [light_obj.matrix_world @ Vector(corner) for corner in local_corners]
+        x_arr = np.array([v.x for v in corners])
+        y_arr = np.array([v.y for v in corners])
+        z_arr = np.array([v.z for v in corners])
+    else:
+        # For non-area lights, just return the position as arrays of length 1
+        x_arr = np.array([pos[0]])
+        y_arr = np.array([pos[1]])
+        z_arr = np.array([pos[2]])
+    logger.debug(f"[set_light_position_and_orientation] Light: {light_obj.name}, Position: {(x_arr, y_arr, z_arr)}")
+    return x_arr, y_arr, z_arr
 
 
 def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_progress=True):
@@ -217,12 +199,22 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
     render_diffdir_png_node = bpy.data.scenes["Scene"].node_tree.nodes["render_diffdir_png"]
     render_diffindir_png_node = bpy.data.scenes["Scene"].node_tree.nodes["render_diffindir_png"]
 
+    # Check all light sources exist at the beginning and are of type 'LIGHT'
+    missing_lights = [cfg.name for cfg in light_sources if bpy.data.objects.get(cfg.name) is None]
+    if missing_lights:
+        logger.error(f"Light sources not found in scene: {missing_lights}")
+        raise ValueError(f"Light sources not found in scene: {missing_lights}")
+    wrong_type_lights = [cfg.name for cfg in light_sources if bpy.data.objects.get(cfg.name) is not None and bpy.data.objects.get(cfg.name).type != 'LIGHT']
+    if wrong_type_lights:
+        logger.error(f"Light sources not of type 'LIGHT': {wrong_type_lights}")
+        raise ValueError(f"Light sources not of type 'LIGHT': {wrong_type_lights}")
+
     # Get bounding box of 'lights_bbox' object
     lights_bbox_obj = bpy.data.objects["lights_bbox"]
     if lights_bbox_obj is None:
         logger.error("Blender object 'lights_bbox' not found in the scene.")
         raise ValueError("Blender object 'lights_bbox' not found in the scene.")
-    bbox_corners = [lights_bbox_obj.matrix_world @ Vector(corner) for corner in lights_bbox_obj.bound_box]
+    _, bbox_corners = get_object_bbox_center_and_corners(lights_bbox_obj)
     xs = [v.x for v in bbox_corners]
     ys = [v.y for v in bbox_corners]
     zs = [v.z for v in bbox_corners]
@@ -230,8 +222,11 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
     x_range = [min(xs) + eps, max(xs) - eps]
     y_range = [min(ys) + eps, max(ys) - eps]
     z_range = [min(zs) + eps, max(zs) - eps]
-    bbox_center = ((x_range[0] + x_range[1]) / 2, (y_range[0] + y_range[1]) / 2, (z_range[0] + z_range[1]) / 2)
     logger.info(f"light bbox range: {x_range}, {y_range}, {z_range}")
+
+    # Get cornell_box bounding box and center
+    cornell_center, cornell_corners = get_object_bbox_center_and_corners(cornell_box)
+    cornell_faces = get_cornell_faces(cornell_corners)
 
     def filter_valid_positions(positions):
         logger.debug(f"Filtering {len(positions)} positions for validity (not inside large or small box)...")
@@ -240,9 +235,10 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
         return filtered
 
     # --- Visualization Data Structures ---
-    vis_positions = {"train": {}, "val": {}}
-    subset_vis_positions = []  # List of (subset_size, {light_name: [positions]})
+    vis_positions = {}
+    pos_to_vis_pos = {}
 
+    round_val = 3
     # --- TRAIN SET ---
     train_dir = output_dir / "train"
     os.makedirs(train_dir, exist_ok=True)
@@ -250,15 +246,13 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
     render_diffdir_png_node.base_path = str(train_dir)
     render_diffindir_png_node.base_path = str(train_dir)
     train_positions = []
+    pos_to_index = {}
     logger.info("Starting TRAIN set generation loop.")
     for light_cfg in light_sources:
         logger.info(f"Processing TRAIN light source: {light_cfg.name} (mode={light_cfg.mode}, powers={light_cfg.powers})")
         light_obj = bpy.data.objects.get(light_cfg.name)
         train_positions_cfg = generate_light_grid_positions(light_obj, N, light_cfg.mode, x_range, y_range, z_range, filter_valid_positions)
-        unique_positions = list({(round(x, 8), round(y, 8), round(z, 8)): (x, y, z) for (x, y, z) in train_positions_cfg}.values())
-        logger.debug(f"{len(unique_positions)} unique positions for light source {light_cfg.name} after deduplication.")
-        train_positions.extend([(x, y, z, light_cfg.name, light_cfg.powers) for (x, y, z) in unique_positions])
-        vis_positions["train"].setdefault(light_cfg.name, []).extend(unique_positions)
+        train_positions.extend([(round(x, round_val), round(y, round_val), round(z, round_val), light_cfg.name, light_cfg.powers) for (x, y, z) in train_positions_cfg])
     N_actual = len(train_positions)
     train_csv_path = train_dir / f"light_positions_{N_actual}.csv"
     logger.info(f"Writing train CSV to {train_csv_path} with {N_actual} positions.")
@@ -269,10 +263,11 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
         for (x, y, z, name, powers) in train_positions:
             logger.debug(f"Setting light '{name}' to position ({x}, {y}, {z}) for TRAIN row {count}.")
             light_obj = bpy.data.objects.get(name)
-            if light_obj is None:
-                logger.warning(f"Light source '{name}' not found in scene.")
-                continue
-            set_light_position_and_orientation(light_obj, (x, y, z), bbox_center, cornell_box, x_range, y_range, z_range)
+            facing_point = get_facing_point((x, y, z), cornell_center, cornell_faces)
+            logger.debug(f"[set_light_position_and_orientation] Light: {name}, Position: {(x, y, z)}, Facing point: {facing_point}")
+            x_arr, y_arr, z_arr = set_light_position_and_orientation(light_obj, (x, y, z), facing_point)
+            vis_positions.setdefault((name, light_obj.data.type, f"train_{N_actual}"), []).append((count, x_arr, y_arr, z_arr))
+            pos_to_vis_pos[(name, x, y, z)] = (count, x_arr, y_arr, z_arr)
             light_obj.hide_render = False
             light_obj.hide_viewport = False
             for power in powers:
@@ -280,14 +275,13 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
                 light_obj.data.energy = power
                 csv_writer.writerow([count, name, power, x, y, z])
                 csvfile.flush()
+                pos_to_index[(x, y, z, name, power)] = count
                 render_png_node.file_slots[0].path = f"{count:05d}_render_"
                 render_diffdir_png_node.file_slots[0].path = f"{count:05d}_diffdir_"
                 render_diffindir_png_node.file_slots[0].path = f"{count:05d}_diffindir_"
                 logger.debug(f"Rendering TRAIN image {count} for light '{name}' at position ({x}, {y}, {z}) with power {power}.")
-                bpy.ops.render.render()
-                if show_progress and (count + 1) % 10 == 0:
-                    logger.info(f"Generated {count + 1} train images")
                 count += 1
+                # bpy.ops.render.render() # TODO: uncomment this
             light_obj.hide_render = True
             light_obj.hide_viewport = True
     logger.info("Completed TRAIN set generation loop.")
@@ -298,18 +292,14 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
     logger.info("Starting SUBSETS generation loop.")
     while subset_size > 1:
         subset_size = subset_size // 2
-        if subset_size < 1:
+        if subset_size <= 1:
             break
         subset_positions = []
-        subset_vis = {}
         for light_cfg in light_sources:
             logger.info(f"Processing SUBSET light source: {light_cfg.name} (mode={light_cfg.mode}, powers={light_cfg.powers}, subset_size={subset_size})")
             light_obj = bpy.data.objects.get(light_cfg.name)
             subset_positions_cfg = generate_light_grid_positions(light_obj, subset_size, light_cfg.mode, x_range, y_range, z_range, filter_valid_positions)
-            unique_positions = list({(round(x, 8), round(y, 8), round(z, 8)): (x, y, z) for (x, y, z) in subset_positions_cfg}.values())
-            logger.debug(f"{len(unique_positions)} unique positions for light source {light_cfg.name} in SUBSET after deduplication.")
-            subset_positions.extend([(x, y, z, light_cfg.name, light_cfg.powers) for (x, y, z) in unique_positions])
-            subset_vis.setdefault(light_cfg.name, []).extend(unique_positions)
+            subset_positions.extend([(round(x, round_val), round(y, round_val), round(z, round_val), light_cfg.name, light_obj.data.type, light_cfg.powers) for (x, y, z) in subset_positions_cfg])
         subset_N_actual = len(subset_positions)
         subset_csv_path = train_dir / f"light_positions_{subset_N_actual}.csv"
         logger.info(f"Writing SUBSET train CSV to {subset_csv_path} with {subset_N_actual} positions.")
@@ -317,18 +307,16 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
             csv_writer = csv.writer(csvfile)
             csv_writer.writerow(['index', 'light_name', 'power', 'x', 'y', 'z'])
             # Map from position+name to original index in the full set
-            pos_to_index = { (round(x,8), round(y,8), round(z,8), name): idx for idx, (x, y, z, name, _) in enumerate(train_positions) }
-            for (x, y, z, name, powers) in subset_positions:
-                orig_index = pos_to_index.get((round(x,8), round(y,8), round(z,8), name), None)
-                if orig_index is None:
-                    logger.debug(f"Skipping SUBSET position ({x}, {y}, {z}, {name}) as it was not found in the original train set.")
-                    continue
-                light_obj = bpy.data.objects.get(name)
-                set_light_position_and_orientation(light_obj, (x, y, z), bbox_center, cornell_box, x_range, y_range, z_range)
+            for (x, y, z, name, light_type, powers) in subset_positions:
+                orig_index, x_arr, y_arr, z_arr = pos_to_vis_pos[(name, x, y, z)]
+                vis_positions.setdefault((name, light_type, f"train_{subset_N_actual}"), []).append((orig_index, x_arr, y_arr, z_arr))
                 for power in powers:
-                    logger.debug(f"Writing SUBSET row for light '{name}' at position ({x}, {y}, {z}) with power {power} (orig_index={orig_index}).")
-                    csv_writer.writerow([f"{orig_index:05d}_render_", name, power, x, y, z])
-        subset_vis_positions.append((subset_size, subset_vis))
+                    orig_index = pos_to_index.get((x, y, z, name, power), None)
+                    if orig_index is None:
+                        logger.debug(f"Skipping SUBSET position ({x}, {y}, {z}, {name}) as it was not found in the original train set.")
+                        continue
+                    csv_writer.writerow([orig_index, name, power, x, y, z])
+                    csvfile.flush()
     logger.info("Completed SUBSETS generation loop.")
 
     # --- VALIDATION SET ---
@@ -340,8 +328,6 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
     val_csv_path = val_dir / "light_positions.csv"
     logger.info(f"Writing validation CSV to {val_csv_path}.")
     logger.info("Starting VAL set generation loop.")
-    for light_cfg in light_sources:
-        vis_positions["val"].setdefault(light_cfg.name, [])
     with open(val_csv_path, 'w', newline='', buffering=1) as csvfile:
         csv_writer = csv.writer(csvfile)
         csv_writer.writerow(['index', 'light_name', 'power', 'x', 'y', 'z'])
@@ -351,12 +337,12 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
             light_obj = bpy.data.objects.get(light_cfg.name)
             val_positions = generate_light_random_positions(light_obj, light_cfg.mode, Y, x_range, y_range, z_range, filter_valid_positions)
             logger.debug(f"{len(val_positions)} positions sampled for VAL light source {light_cfg.name}.")
-            if light_obj is None:
-                logger.warning(f"Light source '{light_cfg.name}' not found in scene.")
-                continue
             for i, (x, y, z) in enumerate(val_positions):
                 logger.debug(f"Setting light '{light_cfg.name}' to position ({x}, {y}, {z}) for VAL row {count}.")
-                set_light_position_and_orientation(light_obj, (x, y, z), bbox_center, cornell_box, x_range, y_range, z_range)
+                facing_point = get_facing_point((x, y, z), cornell_center, cornell_faces)
+                logger.debug(f"[set_light_position_and_orientation] Light: {light_cfg.name}, Position: {(x, y, z)}, Facing point: {facing_point}")
+                x_arr, y_arr, z_arr = set_light_position_and_orientation(light_obj, (x, y, z), facing_point)
+                vis_positions.setdefault((light_cfg.name, light_obj.data.type, "val"), []).append((count, x_arr, y_arr, z_arr))
                 light_obj.hide_render = False
                 light_obj.hide_viewport = False
                 power = random.choice(light_cfg.powers)
@@ -368,13 +354,9 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
                 render_diffdir_png_node.file_slots[0].path = f"{count:05d}_diffdir_"
                 render_diffindir_png_node.file_slots[0].path = f"{count:05d}_diffindir_"
                 logger.debug(f"Rendering VAL image {count} for light '{light_cfg.name}' at position ({x}, {y}, {z}) with power {power}.")
-                bpy.ops.render.render()
-                light_obj.hide_render = True
-                light_obj.hide_viewport = True
-                vis_positions["val"][light_cfg.name].append((x, y, z))
-                if show_progress and (count + 1) % 10 == 0:
-                    logger.info(f"Generated {count + 1} val images")
-                count += 1
+                # bpy.ops.render.render() # TODO: uncomment this
+            light_obj.hide_render = True
+            light_obj.hide_viewport = True
     logger.info("Completed VAL set generation loop.")
 
     if show_progress:
@@ -384,17 +366,8 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
 
     # --- PLOTLY VISUALIZATION ---
     scene_object_names = ["cornell_box", "large_box", "small_box"]
-    plot_dict = {}
-    # Add train
-    for light_name, positions in vis_positions["train"].items():
-        plot_dict[(light_name, "train")] = positions
-    # Add subsets
-    for subset_size, subset_vis in subset_vis_positions:
-        for light_name, positions in subset_vis.items():
-            plot_dict[(light_name, f"subset{subset_size}")] = positions
-    # Add val
-    for light_name, positions in vis_positions["val"].items():
-        plot_dict[(light_name, "val")] = positions
     output_html = str(output_dir / "light_positions_plot.html")
-    plot_light_positions_with_scene(plot_dict, scene_object_names, show=False, output_html=output_html)
+    _tmp = {key: len(val) for key, val in vis_positions.items()}
+    logger.info(f"vis_positions: {_tmp}")
+    plot_light_positions_with_scene(vis_positions, scene_object_names, show=False, output_html=output_html)
     logger.info(f"Saved light positions plot to {output_html}") 

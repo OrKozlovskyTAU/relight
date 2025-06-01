@@ -48,11 +48,11 @@ def main():
 
     # Example: define light sources (customize as needed)
     light_sources = [
-        # LightSourceConfiguration(
-        #     name="Point",
-        #     powers=[1, 1.5, 2],
-        #     mode="interior",
-        # ),
+        LightSourceConfiguration(
+            name="Point",
+            powers=[1, 1.5, 2],
+            mode="interior",
+        ),
         LightSourceConfiguration(
             name="Area1",
             powers=[1, 1.5, 2],

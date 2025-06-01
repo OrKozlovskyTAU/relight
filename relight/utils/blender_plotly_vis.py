@@ -2,7 +2,6 @@ import bpy
 import os
 import sys
 import logging
-from mathutils import Vector, Matrix
 import csv
 from pathlib import Path
 
@@ -27,7 +26,6 @@ os.environ['PYTHONPATH'] = repo_root + ':' + os.environ.get('PYTHONPATH', '')
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from relight.utils.blender_utils import orient_area_light_toward_bbox, get_area_light_size
 
 import plotly.graph_objects as go
 import numpy as np
@@ -63,6 +61,16 @@ def _get_mesh_data(obj):
     return x, y, z, i, j, k
 
 
+def get_palette(n):
+    """
+    Returns a color palette of length n, repeating Plotly's qualitative palette as needed.
+    """
+    palette = [
+        '#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A',
+        '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52'
+    ]
+    return [palette[i % len(palette)] for i in range(n)]
+
 def plot_blender_objects(object_names, colors=None, opacity=0.5, show=True):
     """
     Visualize multiple Blender mesh objects in a Plotly 3D figure.
@@ -77,12 +85,7 @@ def plot_blender_objects(object_names, colors=None, opacity=0.5, show=True):
         plotly.graph_objs._figure.Figure: The Plotly 3D figure.
     """
     if colors is None:
-        # Use Plotly's qualitative palette, repeat if needed
-        palette = [
-            '#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A',
-            '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52'
-        ]
-        colors = [palette[i % len(palette)] for i in range(len(object_names))]
+        colors = get_palette(len(object_names))
     traces = []
     for idx, name in enumerate(object_names):
         obj = bpy.data.objects.get(name)
@@ -101,6 +104,7 @@ def plot_blender_objects(object_names, colors=None, opacity=0.5, show=True):
             name=name
         )
         traces.append(mesh3d)
+        logger.info(f"Added mesh {name} with {len(x)} vertices and {len(i)} faces")
     fig = go.Figure(data=traces)
     fig.update_layout(
         scene=dict(
@@ -120,7 +124,9 @@ def plot_light_positions_with_scene(light_positions_dict, scene_object_names, sh
     """
     Visualize the scene geometry and the light source positions.
     Args:
-        light_positions_dict: dict mapping (light_name, label) -> list of (x, y, z) positions
+        light_positions_dict: dict mapping (light_name, light_type, label) -> list of (idx, x, y, z) positions
+            - For POINT lights: x, y, z are values
+            - For AREA lights: x, y, z are np.arrays representing the world_corners (shape: (N, 3))
         scene_object_names: list of mesh object names to show as context
         show: whether to show the plot
         output_html: if given, save the plot to this HTML file
@@ -129,98 +135,57 @@ def plot_light_positions_with_scene(light_positions_dict, scene_object_names, sh
     logger.debug(f"Scene objects to plot: {scene_object_names}")
     logger.debug(f"Light positions dict contains {len(light_positions_dict)} entries")
 
-    # Compute bbox_center from 'lights_bbox' object
-    lights_bbox_obj = bpy.data.objects.get("lights_bbox")
-    if lights_bbox_obj is None:
-        logger.error("Blender object 'lights_bbox' not found in the scene. Area lights will not be oriented.")
-        bbox_center = None
-    else:
-        bbox_corners = [lights_bbox_obj.matrix_world @ Vector(corner) for corner in lights_bbox_obj.bound_box]
-        xs = [v.x for v in bbox_corners]
-        ys = [v.y for v in bbox_corners]
-        zs = [v.z for v in bbox_corners]
-        bbox_center = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, (min(zs) + max(zs)) / 2)
-        logger.info(f"lights_bbox center: {bbox_center}")
+    palette = get_palette(len(scene_object_names) + len(light_positions_dict))
 
-    palette = [
-        '#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A',
-        '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52'
-    ]
     # Use plot_blender_objects to get the scene geometry as a base figure
     logger.debug("Creating base figure with scene objects")
     fig = plot_blender_objects(scene_object_names, colors=palette, opacity=0.3, show=False)
-    
+
     # Add light positions
     logger.info("Adding light position traces to figure")
-    for idx, ((light_name, label), positions) in enumerate(light_positions_dict.items()):
-        logger.debug(f"Processing light '{light_name}' with label '{label}' ({len(positions)} positions)")
-        obj = bpy.data.objects.get(light_name)
-        if obj is None:
-            logger.warning(f"Light object '{light_name}' not found in scene, skipping")
-            continue
-        if obj.type != 'LIGHT':
-            logger.warning(f"Object '{light_name}' is not a light (type: {obj.type}), skipping")
-            continue
-            
-        light_type = obj.data.type
+    for idx, ((light_name, light_type, label), positions) in enumerate(light_positions_dict.items()):
+        logger.debug(f"Processing light '{light_name}' (type: '{light_type}') with label '{label}' ({len(positions)} positions)")
         color = palette[(idx+len(scene_object_names)) % len(palette)]
-        pos_arr = np.array(positions)
-        if len(pos_arr) == 0:
+        if len(positions) == 0:
             logger.warning(f"No positions to plot for light '{light_name}', skipping")
             continue
-            
+        indices = np.array([p[0] for p in positions])
         trace_name = f"{label}/{light_name}"
         legendgroup = f"{label}/{light_name}"
-        logger.debug(f"Creating trace for {trace_name} (type: {light_type})")
-        
         if light_type == 'POINT':
-            # Plot as dots
-            logger.debug(f"Adding point light trace with {len(pos_arr)} positions")
+            xs = np.array([p[1][0] for p in positions])
+            ys = np.array([p[2][0] for p in positions])
+            zs = np.array([p[3][0] for p in positions])
+            logger.debug(f"Adding point light trace with {len(xs)} positions")
             trace = go.Scatter3d(
-                x=pos_arr[:,0], y=pos_arr[:,1], z=pos_arr[:,2],
+                x=xs, y=ys, z=zs,
                 mode='markers',
                 marker=dict(size=5, color=color),
                 name=trace_name,
-                legendgroup=legendgroup
+                legendgroup=legendgroup,
+                customdata=indices,
+                hovertemplate='Light Index: %{customdata}<br>X: %{x}<br>Y: %{y}<br>Z: %{z}<extra></extra>'
             )
             fig.add_trace(trace)
         elif light_type == 'AREA':
-            # Plot each position as a square (treat area light as square)
-            size_x, _ = get_area_light_size(obj)
-            size_y = size_x  # Assume square area light for visualization
-            logger.debug(f"Adding area light traces for {len(positions)} positions (size: {size_x}x{size_y}, square assumed)")
-            if bbox_center is not None:
-                # Side effect: this changes the orientation of the light in the Blender scene
-                # orient_area_light_toward_bbox(obj, bbox_center)
-                logger.info(f"Oriented area light '{light_name}' to face bbox center {bbox_center}")
-            for pos_idx, pos in enumerate(positions):
-                local_corners = np.array([
-                    [-size_x/2, -size_y/2, 0],
-                    [ size_x/2, -size_y/2, 0],
-                    [ size_x/2,  size_y/2, 0],
-                    [-size_x/2,  size_y/2, 0],
-                    [-size_x/2, -size_y/2, 0],  # close loop
-                ])
-                # Compute orientation as if the light were at 'pos' and facing bbox_center
-                if bbox_center is not None:
-                    direction = Vector(bbox_center) - Vector(pos)
-                    direction.normalize()
-                    rot = direction.to_track_quat('-Z', 'Y').to_matrix().to_3x3()
-                else:
-                    rot = Matrix.Identity(3)
-                world_corners = np.array([rot @ Vector(corner) + Vector(pos) for corner in local_corners])
-                logger.info(f"pos: {pos}, size_x: {size_x}, bbox_center: {bbox_center}")
-                logger.info(f"direction: {direction}")
-                logger.info(f"world_corners[0]: {world_corners[0]}")
+            logger.debug(f"Adding area light traces for {len(positions)} positions (world_corners)")
+            for i, (pos_idx, x, y, z) in enumerate(positions):
+                # x, y, z are np.arrays representing the world_corners (shape: (N, 3))
+                world_corners = np.stack([x, y, z], axis=1) if (isinstance(x, np.ndarray) and isinstance(y, np.ndarray) and isinstance(z, np.ndarray)) else np.array([x, y, z]).T
                 trace = go.Scatter3d(
                     x=world_corners[:,0], y=world_corners[:,1], z=world_corners[:,2],
                     mode='lines',
                     line=dict(color=color, width=4),
                     name=trace_name,
                     legendgroup=legendgroup,
-                    showlegend=True if pos_idx == 0 else False  # Only show legend once per light
+                    showlegend=i==0,
+                    customdata=np.full(world_corners.shape[0], pos_idx),
+                    hovertemplate='Light Index: %{customdata}<br>X: %{x}<br>Y: %{y}<br>Z: %{z}<extra></extra>'
                 )
                 fig.add_trace(trace)
+        else:
+            logger.warning(f"Unknown light type '{light_type}' for light '{light_name}', skipping")
+            continue
 
     logger.debug("Updating figure layout")
     fig.update_layout(
@@ -232,14 +197,15 @@ def plot_light_positions_with_scene(light_positions_dict, scene_object_names, sh
         ),
         title="Blender Scene with Light Source Positions"
     )
-    
+
     if output_html:
         logger.info(f"Saving figure to {output_html}")
         fig.write_html(output_html)
+
     if show:
         logger.debug("Displaying figure")
         fig.show()
-        
+
     logger.info("Light positions visualization complete")
     return fig
 
@@ -281,11 +247,13 @@ def plot_from_light_positions_csvs(
 
         with open(csv_path, newline='') as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for idx, row in enumerate(reader):
                 light_name = row['light_name']
                 x, y, z = float(row['x']), float(row['y']), float(row['z'])
+                # Use row["index"] if present, else fallback to idx
+                row_index = int(row["index"]) if "index" in row and row["index"] != '' else idx
                 key = (light_name, label)
-                plot_dict.setdefault(key, []).append((x, y, z))
+                plot_dict.setdefault(key, []).append((row_index, x, y, z))
 
     plot_light_positions_with_scene(
         plot_dict,
