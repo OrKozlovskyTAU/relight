@@ -15,6 +15,7 @@ from relight.utils.blender_utils import (
     get_facing_point,
 )
 from relight.utils.blender_plotly_vis import plot_light_positions_with_scene
+from math import pi
 
 # Set up logging
 logging.basicConfig(
@@ -62,10 +63,41 @@ def generate_grid_positions(x_range, y_range, z_range, grid_size):
 
 
 class LightSourceConfiguration:
-    def __init__(self, name, powers, mode):
+    def __init__(self, name, irradiances, mode, light_type=None):
         self.name = name
-        self.powers = powers  # list of floats (W)
+        self.irradiances = irradiances  # list of floats (W/m^2)
         self.mode = mode      # 'interior', 'faces', 'interior and faces'
+        self.light_type = light_type  # Optional: 'POINT', 'AREA', etc.
+
+    def compute_powers_vectorized(self, positions, target_point, light_obj):
+        """
+        Vectorized computation of required powers for all positions and all irradiances.
+        positions: np.ndarray of shape (N, 3)
+        target_point: (x, y, z)
+        light_obj: Blender light object
+        Returns: np.ndarray of shape (N, len(self.irradiances))
+        """
+        positions = np.asarray(positions)
+        d = positions - np.array(target_point)[None, :]
+        r2 = np.sum(d**2, axis=1)
+        E = np.array(self.irradiances)  # shape (M,)
+        if light_obj.data.type == 'POINT':
+            # P = E * 4 * pi * r^2
+            powers = E[None, :] * 4 * pi * r2[:, None]
+        elif light_obj.data.type == 'AREA':
+            # Use the exact solid angle formula for a rectangle, assuming the target is on the normal axis
+            size_x, _ = get_area_light_size(light_obj)
+            w, h = size_x, size_x  # assume square
+            d = positions - np.array(target_point)[None, :]
+            z = np.linalg.norm(d, axis=1)
+            denom = 2 * z * np.sqrt(4 * z**2 + w**2 + h**2)
+            omega = 4 * np.arctan2(w * h, denom)
+            omega = np.clip(omega, 1e-8, None)
+            powers = E[None, :] * w * h * pi / omega[:, None]
+        else:
+            # Default to point light formula
+            powers = E[None, :] * 4 * pi * r2[:, None]
+        return powers  # shape (N, M)
 
 
 def get_adjusted_ranges(light_obj, x_range, y_range, z_range):
@@ -233,7 +265,9 @@ def generate_train_set(light_sources, N, x_range, y_range, z_range, filter_valid
     for light_cfg in light_sources:
         light_obj = bpy.data.objects.get(light_cfg.name)
         train_positions_cfg = generate_light_grid_positions(light_obj, N, light_cfg.mode, x_range, y_range, z_range, filter_valid_fn)
-        train_positions.extend([(round(x, round_val), round(y, round_val), round(z, round_val), light_cfg.name, light_cfg.powers) for (x, y, z) in train_positions_cfg])
+        positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in train_positions_cfg])
+        powers_arr = light_cfg.compute_powers_vectorized(positions_arr, cornell_center, light_obj)  # shape (N, M)
+        train_positions.extend([(x, y, z, light_cfg.name, powers) for (x, y, z, powers) in zip(positions_arr, powers_arr)])
     N_actual = len(train_positions)
     train_csv_path = train_dir / f"light_positions_{N_actual}.csv"
     write_light_positions_csv(train_csv_path, train_positions)
@@ -252,11 +286,12 @@ def generate_subsets(light_sources, N, x_range, y_range, z_range, filter_valid_f
         for light_cfg in light_sources:
             light_obj = bpy.data.objects.get(light_cfg.name)
             subset_positions_cfg = generate_light_grid_positions(light_obj, subset_size, light_cfg.mode, x_range, y_range, z_range, filter_valid_fn)
-            subset_positions.extend([(round(x, round_val), round(y, round_val), round(z, round_val), light_cfg.name, light_obj.data.type, light_cfg.powers) for (x, y, z) in subset_positions_cfg])
+            positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in subset_positions_cfg])
+            powers_arr = light_cfg.compute_powers_vectorized(positions_arr, bpy.data.objects["cornell_box"].location, light_obj)
+            subset_positions.extend([(x, y, z, light_cfg.name, light_obj.data.type, powers) for (x, y, z, powers) in zip(positions_arr, powers_arr)])
         subset_N_actual = len(subset_positions)
         subset_csv_path = train_dir / f"light_positions_{subset_N_actual}.csv"
         write_light_positions_csv(subset_csv_path, [(x, y, z, name, powers) for (x, y, z, name, _, powers) in subset_positions])
-        
         for (x, y, z, name, light_type, _) in subset_positions:
             if (name, x, y, z) in pos_to_vis_pos:
                 count, x_arr, y_arr, z_arr = pos_to_vis_pos[(name, x, y, z)]
@@ -267,7 +302,9 @@ def generate_val_set(light_sources, Y, x_range, y_range, z_range, filter_valid_f
     for light_cfg in light_sources:
         light_obj = bpy.data.objects.get(light_cfg.name)
         val_positions_cfg = generate_light_random_positions(light_obj, light_cfg.mode, Y, x_range, y_range, z_range, filter_valid_fn)
-        val_positions.extend([(round(x, round_val), round(y, round_val), round(z, round_val), light_cfg.name, [random.choice(light_cfg.powers)]) for (x, y, z) in val_positions_cfg])
+        positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in val_positions_cfg])
+        powers_arr = light_cfg.compute_powers_vectorized(positions_arr, cornell_center, light_obj)
+        val_positions.extend([(x, y, z, light_cfg.name, powers) for (x, y, z, powers) in zip(positions_arr, powers_arr)])
     val_csv_path = val_dir / "light_positions.csv"
     write_light_positions_csv(val_csv_path, val_positions)
     render_light_positions(val_positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, "val")
