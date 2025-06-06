@@ -153,25 +153,36 @@ def plot_light_positions_with_scene(light_positions_dict, scene_object_names, sh
         trace_name = f"{label}/{light_name}"
         legendgroup = f"{label}/{light_name}"
         if light_type == 'POINT':
+            # Each position: (idx, x, y, z, powers)
             xs = np.array([p[1][0] for p in positions])
             ys = np.array([p[2][0] for p in positions])
             zs = np.array([p[3][0] for p in positions])
-            logger.debug(f"Adding point light trace with {len(xs)} positions")
+            idx_ranges = []
+            powers_strs = []
+            for p in positions:
+                idx = p[0]
+                powers = p[4]
+                idx_range = f"{idx}-{idx+len(powers)-1}" if len(powers) > 1 else f"{idx}"
+                idx_ranges.append(idx_range)
+                powers_strs.append(", ".join(f"{pw:.2f}" for pw in powers))
+            customdata = np.stack([idx_ranges, powers_strs], axis=1)
             trace = go.Scatter3d(
                 x=xs, y=ys, z=zs,
                 mode='markers',
                 marker=dict(size=5, color=color),
                 name=trace_name,
                 legendgroup=legendgroup,
-                customdata=indices,
-                hovertemplate='Light Index: %{customdata}<br>X: %{x}<br>Y: %{y}<br>Z: %{z}<extra></extra>'
+                customdata=customdata,
+                hovertemplate='Light Index: %{customdata[0]}<br>Powers: %{customdata[1]} W<br>X: %{x}<br>Y: %{y}<br>Z: %{z}<extra></extra>'
             )
             fig.add_trace(trace)
         elif light_type == 'AREA':
             logger.debug(f"Adding area light traces for {len(positions)} positions (world_corners)")
-            for i, (pos_idx, x, y, z) in enumerate(positions):
-                # x, y, z are np.arrays representing the world_corners (shape: (N, 3))
+            for i, (pos_idx, x, y, z, powers) in enumerate(positions):
                 world_corners = np.stack([x, y, z], axis=1) if (isinstance(x, np.ndarray) and isinstance(y, np.ndarray) and isinstance(z, np.ndarray)) else np.array([x, y, z]).T
+                idx_range = f"{pos_idx}-{pos_idx+len(powers)-1}" if len(powers) > 1 else f"{pos_idx}"
+                powers_str = ", ".join(f"{pw:.2f}" for pw in powers)
+                customdata = np.full((world_corners.shape[0], 2), (idx_range, powers_str))
                 trace = go.Scatter3d(
                     x=world_corners[:,0], y=world_corners[:,1], z=world_corners[:,2],
                     mode='lines',
@@ -179,8 +190,8 @@ def plot_light_positions_with_scene(light_positions_dict, scene_object_names, sh
                     name=trace_name,
                     legendgroup=legendgroup,
                     showlegend=i==0,
-                    customdata=np.full(world_corners.shape[0], pos_idx),
-                    hovertemplate='Light Index: %{customdata}<br>X: %{x}<br>Y: %{y}<br>Z: %{z}<extra></extra>'
+                    customdata=customdata,
+                    hovertemplate='Light Index: %{customdata[0]}<br>Powers: %{customdata[1]} W<br>X: %{x}<br>Y: %{y}<br>Z: %{z}<extra></extra>'
                 )
                 fig.add_trace(trace)
         else:

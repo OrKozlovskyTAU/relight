@@ -30,9 +30,10 @@ os.environ['HF_HOME'] = '/home/dcor/orkozlovsky/.cache/huggingface'
 os.environ['PYTHONPATH'] = '/home/dcor/orkozlovsky/repos/relight/:' + os.environ.get('PYTHONPATH', '')
 
 # Build the command to run
-cmd = '/home/dcor/orkozlovsky/blender-3.6.5-linux-x64/blender mpi_cornel.blend --background --python relight/cli/light_dataset.py -- --N 4 --Y 2 --output-dir data_v2 --no-gpu'
+cmd = '/home/dcor/orkozlovsky/blender-3.6.5-linux-x64/blender mpi_cornel.blend --background --python relight/cli/light_dataset.py -- --N 20 --Y 10 --output-dir data_v2'
 
 # Submit the job
 job_id = slurm.sbatch(cmd)
+# print(cmd)
 print(f"Submitted SLURM job {job_id}")
 print(f"SLURM output will be in: slurm/{job_id}.out") 

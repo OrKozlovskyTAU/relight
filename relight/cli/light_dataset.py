@@ -10,6 +10,8 @@ import argparse
 from pathlib import Path
 import sys
 
+import numpy as np
+
 # Add relight source directory to PYTHONPATH
 repo_root = '/home/dcor/orkozlovsky/repos/relight/'
 os.environ['PYTHONPATH'] = repo_root + ':' + os.environ.get('PYTHONPATH', '')
@@ -50,12 +52,12 @@ def main():
     light_sources = [
         LightSourceConfiguration(
             name="Point",
-            powers=[1, 1.5, 2],
+            irradiances=list(np.linspace(1, 6, 4)),
             mode="interior",
         ),
         LightSourceConfiguration(
             name="Area1",
-            powers=[1, 1.5, 2],
+            irradiances=list(np.linspace(1, 7, 4)),
             mode="faces",
         )
     ]

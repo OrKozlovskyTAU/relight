@@ -107,35 +107,43 @@ def get_adjusted_ranges(light_obj, x_range, y_range, z_range):
         size_y = size_x  # Assume area light is square for all calculations
         x_range_area = [x_range[0] + size_x/2, x_range[1] - size_x/2]
         y_range_area = [y_range[0] + size_y/2, y_range[1] - size_y/2]
-        z_range_area = z_range  # Assuming area light is flat in XY, adjust if needed
+        z_range_area = [z_range[0] + size_x/2, z_range[1] - size_x/2]
         return x_range_area, y_range_area, z_range_area
     return x_range, y_range, z_range
 
 
-def generate_light_grid_positions(light_obj, grid_size, mode, x_range, y_range, z_range, filter_valid_positions):
-    # x_r, y_r, z_r = get_adjusted_ranges(light_obj, x_range, y_range, z_range) # TODO: uncomment this
-    x_r, y_r, z_r = x_range, y_range, z_range
+def generate_light_grid_positions(light_obj, grid_size, mode, x_range, y_range, z_range, filter_valid_positions, eps, round_val):
+    logger.debug(f"[generate_light_grid_positions] light_obj: {getattr(light_obj, 'name', None)}, grid_size: {grid_size}, mode: {mode}, x_range: {x_range}, y_range: {y_range}, z_range: {z_range}, eps: {eps}, round_val: {round_val}")
+    x_r, y_r, z_r = get_adjusted_ranges(light_obj, x_range, y_range, z_range)
     x_points = np.linspace(x_r[0], x_r[1], grid_size)
     y_points = np.linspace(y_r[0], y_r[1], grid_size)
     z_points = np.linspace(z_r[0], z_r[1], grid_size)
     if mode == "interior":
         positions = [(x, y, z) for x in x_points for y in y_points for z in z_points]
-        return filter_valid_positions(positions)
+        logger.debug(f"[generate_light_grid_positions] Generated {len(positions)} interior positions before filtering.")
+        filtered = filter_valid_positions(positions)
+        logger.debug(f"[generate_light_grid_positions] {len(filtered)} interior positions after filtering.")
+        return filtered
     elif mode == "faces":
         face_positions = []
-        face_positions += [(x, y, z) for x in [x_r[0], x_r[1]] for y in y_points for z in z_points]
-        face_positions += [(x, y, z) for y in [y_r[0], y_r[1]] for x in x_points for z in z_points]
-        face_positions += [(x, y, z) for z in [z_r[0], z_r[1]] for x in x_points for y in y_points]
-        face_positions = list({(round(x, 8), round(y, 8), round(z, 8)): (x, y, z) for (x, y, z) in face_positions}.values())
-        return filter_valid_positions(face_positions)
+        face_positions += [(x, y, z) for x in [x_range[0] + eps, x_range[1] - eps] for y in y_points for z in z_points]
+        face_positions += [(x, y, z) for y in [y_range[0] + eps, y_range[1] - eps] for x in x_points for z in z_points]
+        face_positions += [(x, y, z) for z in [z_range[0] + eps, z_range[1] - eps] for x in x_points for y in y_points]
+        face_positions = list({(round(x, round_val), round(y, round_val), round(z, round_val)): (x, y, z) for (x, y, z) in face_positions}.values())
+        logger.debug(f"[generate_light_grid_positions] Generated {len(face_positions)} face positions before filtering.")
+        filtered = filter_valid_positions(face_positions)
+        logger.debug(f"[generate_light_grid_positions] {len(filtered)} face positions after filtering.")
+        return filtered
     elif mode == "interior and faces":
-        all_interior = generate_light_grid_positions(light_obj, grid_size, "interior", x_range, y_range, z_range, filter_valid_positions)
-        all_faces = generate_light_grid_positions(light_obj, grid_size, "faces", x_range, y_range, z_range, filter_valid_positions)
+        all_interior = generate_light_grid_positions(light_obj, grid_size, "interior", x_range, y_range, z_range, filter_valid_positions, eps, round_val)
+        all_faces = generate_light_grid_positions(light_obj, grid_size, "faces", x_range, y_range, z_range, filter_valid_positions, eps, round_val)
         n = grid_size ** 3
         n_interior = n // 2
         n_faces = n - n_interior
+        logger.debug(f"[generate_light_grid_positions] Combining {n_interior} interior and {n_faces} face positions.")
         return all_interior[:n_interior] + all_faces[:n_faces]
     else:
+        logger.error(f"[generate_light_grid_positions] Unknown mode: {mode}")
         raise ValueError(f"Unknown mode: {mode}")
 
 
@@ -232,19 +240,20 @@ def write_light_positions_csv(csv_path, positions):
                 count += 1
 
 
-def render_light_positions(positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, set_name, start_count=0):
+def render_light_positions(positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, set_name, eps = 0, start_count=0):
     """
     Set light positions, render, and update vis_positions. Returns the next count.
     positions: list of (x, y, z, name, powers)
     set_name: e.g. 'train_XXX', 'val', etc.
     """
+    logger.info(f"[render_light_positions] Rendering {len(positions)} positions for set '{set_name}' with eps={eps}")
     count = start_count
     for (x, y, z, name, powers) in positions:
         light_obj = bpy.data.objects.get(name)
         facing_point = get_facing_point((x, y, z), cornell_center, cornell_faces)
         x_arr, y_arr, z_arr = set_light_position_and_orientation(light_obj, (x, y, z), facing_point)
-        vis_positions.setdefault((name, light_obj.data.type, set_name), []).append((count, x_arr, y_arr, z_arr))
-        pos_to_vis_pos[(name, x, y, z)] = (count, x_arr, y_arr, z_arr)
+        vis_positions.setdefault((name, light_obj.data.type, set_name), []).append((count, x_arr, y_arr, z_arr, powers))
+        pos_to_vis_pos[(name, x, y, z)] = (count, x_arr, y_arr, z_arr, powers)
         light_obj.hide_render = False
         light_obj.hide_viewport = False
         for power in powers:
@@ -253,29 +262,36 @@ def render_light_positions(positions, cornell_center, cornell_faces, render_node
             render_nodes['render'].file_slots[0].path = f"{count:05d}_render_"
             render_nodes['diffdir'].file_slots[0].path = f"{count:05d}_diffdir_"
             render_nodes['diffindir'].file_slots[0].path = f"{count:05d}_diffindir_"
-            # bpy.ops.render.render() # Uncomment in production
+            bpy.ops.render.render()
+            logger.debug(f"[render_light_positions] Rendered index {count} for light {name} at ({x}, {y}, {z}) with power {power}")
             count += 1
         light_obj.hide_render = True
         light_obj.hide_viewport = True
+    logger.info(f"[render_light_positions] Finished rendering set '{set_name}'. Final count: {count}")
     return count
 
 
-def generate_train_set(light_sources, N, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, train_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index):
+def generate_train_set(light_sources, N, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, train_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index, eps):
+    logger.info(f"[generate_train_set] Generating train set with N={N}, eps={eps}")
     train_positions = []
     for light_cfg in light_sources:
         light_obj = bpy.data.objects.get(light_cfg.name)
-        train_positions_cfg = generate_light_grid_positions(light_obj, N, light_cfg.mode, x_range, y_range, z_range, filter_valid_fn)
+        logger.debug(f"[generate_train_set] Generating grid positions for light '{light_cfg.name}'")
+        train_positions_cfg = generate_light_grid_positions(light_obj, N, light_cfg.mode, x_range, y_range, z_range, filter_valid_fn, eps, round_val)
         positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in train_positions_cfg])
         powers_arr = light_cfg.compute_powers_vectorized(positions_arr, cornell_center, light_obj)  # shape (N, M)
-        train_positions.extend([(x, y, z, light_cfg.name, powers) for (x, y, z, powers) in zip(positions_arr, powers_arr)])
+        train_positions.extend([(pos[0], pos[1], pos[2], light_cfg.name, powers) for pos, powers in zip(positions_arr, powers_arr)])
     N_actual = len(train_positions)
+    logger.info(f"[generate_train_set] Total train positions: {N_actual}")
     train_csv_path = train_dir / f"light_positions_{N_actual}.csv"
     write_light_positions_csv(train_csv_path, train_positions)
-    render_light_positions(train_positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, f"train_{N_actual}")
+    render_light_positions(train_positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, f"train_{N_actual}", eps)
+    logger.info(f"[generate_train_set] Train positions saved to {train_csv_path}")
     return train_positions, train_csv_path
 
 
-def generate_subsets(light_sources, N, x_range, y_range, z_range, filter_valid_fn, train_dir, round_val, train_positions, vis_positions, pos_to_vis_pos):
+def generate_subsets(light_sources, N, x_range, y_range, z_range, filter_valid_fn, train_dir, round_val, train_positions, vis_positions, pos_to_vis_pos, eps):
+    logger.info(f"[generate_subsets] Generating subsets with initial N={N}, eps={eps}")
     subset_size = N
     subset_positions = train_positions
     while subset_size > 1:
@@ -285,29 +301,34 @@ def generate_subsets(light_sources, N, x_range, y_range, z_range, filter_valid_f
         subset_positions = []
         for light_cfg in light_sources:
             light_obj = bpy.data.objects.get(light_cfg.name)
-            subset_positions_cfg = generate_light_grid_positions(light_obj, subset_size, light_cfg.mode, x_range, y_range, z_range, filter_valid_fn)
+            logger.debug(f"[generate_subsets] Generating grid positions for light '{light_cfg.name}' with subset_size={subset_size}")
+            subset_positions_cfg = generate_light_grid_positions(light_obj, subset_size, light_cfg.mode, x_range, y_range, z_range, filter_valid_fn, eps, round_val)
             positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in subset_positions_cfg])
             powers_arr = light_cfg.compute_powers_vectorized(positions_arr, bpy.data.objects["cornell_box"].location, light_obj)
-            subset_positions.extend([(x, y, z, light_cfg.name, light_obj.data.type, powers) for (x, y, z, powers) in zip(positions_arr, powers_arr)])
+            subset_positions.extend([(pos[0], pos[1], pos[2], light_cfg.name, light_obj.data.type, powers) for pos, powers in zip(positions_arr, powers_arr)])
         subset_N_actual = len(subset_positions)
+        logger.info(f"[generate_subsets] Subset size: {subset_N_actual}")
         subset_csv_path = train_dir / f"light_positions_{subset_N_actual}.csv"
         write_light_positions_csv(subset_csv_path, [(x, y, z, name, powers) for (x, y, z, name, _, powers) in subset_positions])
         for (x, y, z, name, light_type, _) in subset_positions:
             if (name, x, y, z) in pos_to_vis_pos:
-                count, x_arr, y_arr, z_arr = pos_to_vis_pos[(name, x, y, z)]
-                vis_positions.setdefault((name, light_type, f"train_{subset_N_actual}"), []).append((count, x_arr, y_arr, z_arr))
+                count, x_arr, y_arr, z_arr, powers = pos_to_vis_pos[(name, x, y, z)]
+                vis_positions.setdefault((name, light_type, f"train_{subset_N_actual}"), []).append((count, x_arr, y_arr, z_arr, powers))
 
-def generate_val_set(light_sources, Y, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, val_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index):
+def generate_val_set(light_sources, Y, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, val_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index, eps):
+    logger.info(f"[generate_val_set] Generating validation set with Y={Y}, eps={eps}")
     val_positions = []
     for light_cfg in light_sources:
         light_obj = bpy.data.objects.get(light_cfg.name)
+        logger.debug(f"[generate_val_set] Generating random positions for light '{light_cfg.name}'")
         val_positions_cfg = generate_light_random_positions(light_obj, light_cfg.mode, Y, x_range, y_range, z_range, filter_valid_fn)
         positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in val_positions_cfg])
         powers_arr = light_cfg.compute_powers_vectorized(positions_arr, cornell_center, light_obj)
-        val_positions.extend([(x, y, z, light_cfg.name, powers) for (x, y, z, powers) in zip(positions_arr, powers_arr)])
+        val_positions.extend([(pos[0], pos[1], pos[2], light_cfg.name, powers) for pos, powers in zip(positions_arr, powers_arr)])
     val_csv_path = val_dir / "light_positions.csv"
     write_light_positions_csv(val_csv_path, val_positions)
     render_light_positions(val_positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, "val")
+    logger.info(f"[generate_val_set] Validation positions saved to {val_csv_path}")
     return val_csv_path
 
 
@@ -378,13 +399,13 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
     for node in render_nodes.values():
         node.base_path = str(train_dir)
     train_positions, train_csv_path = generate_train_set(
-        light_sources, N, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, train_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index
+        light_sources, N, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, train_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index, eps
     )
     logger.info(f"Train positions saved to {train_csv_path}")
 
     # --- SUBSET CSVs ---
     generate_subsets(
-        light_sources, N, x_range, y_range, z_range, filter_valid_fn, train_dir, round_val, train_positions, vis_positions, pos_to_vis_pos
+        light_sources, N, x_range, y_range, z_range, filter_valid_fn, train_dir, round_val, train_positions, vis_positions, pos_to_vis_pos, eps
     )
 
     # --- VALIDATION SET ---
@@ -393,7 +414,7 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
     for node in render_nodes.values():
         node.base_path = str(val_dir)
     val_csv_path = generate_val_set(
-        light_sources, Y, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, val_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index
+        light_sources, Y, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, val_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index, eps
     )
     logger.info(f"Validation positions saved to {val_csv_path}")
 

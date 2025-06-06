@@ -197,9 +197,9 @@ def get_cornell_faces(cornell_corners):
     ys = [v.y for v in cornell_corners]
     zs = [v.z for v in cornell_corners]
     faces = [
-        ("x", min(xs), (-1, 0, 0)), ("x", max(xs), (1, 0, 0)),
-        ("y", min(ys), (0, -1, 0)), ("y", max(ys), (0, 1, 0)),
-        ("z", min(zs), (0, 0, -1)), ("z", max(zs), (0, 0, 1)),
+        ("x", round(min(xs), 2), (1, 0, 0)), ("x", round(max(xs), 2), (-1, 0, 0)),
+        ("y", round(min(ys), 2), (0, 1, 0)), ("y", round(max(ys), 2), (0, -1, 0)),
+        ("z", round(min(zs), 2), (0, 0, 1)), ("z", round(max(zs), 2), (0, 0, -1)),
     ]
     return faces
 
@@ -221,8 +221,8 @@ def is_on_face(pos, axis, face_val, eps=0.05):
     """
     logger = logging.getLogger(__name__)
     pos_val = pos[{"x": 0, "y": 1, "z": 2}[axis]]
-    on_face = abs(pos_val - face_val) < eps
-    logger.debug(f"[is_on_face/vis] Position value: {pos_val}, Axis: {axis}, Face value: {face_val}, On face: {on_face}")
+    on_face = abs(pos_val - face_val) <= eps
+    logger.debug(f"[is_on_face/vis] Position value: {pos_val}, Axis: {axis}, Face value: {face_val}, Diff: {round(abs(pos_val - face_val), 3)}, Eps: {eps}, On face: {on_face}")
     return on_face
 
 
