@@ -149,7 +149,6 @@ def plot_light_positions_with_scene(light_positions_dict, scene_object_names, sh
         if len(positions) == 0:
             logger.warning(f"No positions to plot for light '{light_name}', skipping")
             continue
-        indices = np.array([p[0] for p in positions])
         trace_name = f"{label}/{light_name}"
         legendgroup = f"{label}/{light_name}"
         if light_type == 'POINT':
@@ -157,14 +156,8 @@ def plot_light_positions_with_scene(light_positions_dict, scene_object_names, sh
             xs = np.array([p[1][0] for p in positions])
             ys = np.array([p[2][0] for p in positions])
             zs = np.array([p[3][0] for p in positions])
-            idx_ranges = []
-            powers_strs = []
-            for p in positions:
-                idx = p[0]
-                powers = p[4]
-                idx_range = f"{idx}-{idx+len(powers)-1}" if len(powers) > 1 else f"{idx}"
-                idx_ranges.append(idx_range)
-                powers_strs.append(", ".join(f"{pw:.2f}" for pw in powers))
+            idx_ranges = [f"{p[0][0]}-{p[0][-1]}" for p in positions]
+            powers_strs = [", ".join(f"{pw:.2f}" for pw in p[4]) for p in positions]
             customdata = np.stack([idx_ranges, powers_strs], axis=1)
             trace = go.Scatter3d(
                 x=xs, y=ys, z=zs,
@@ -180,7 +173,7 @@ def plot_light_positions_with_scene(light_positions_dict, scene_object_names, sh
             logger.debug(f"Adding area light traces for {len(positions)} positions (world_corners)")
             for i, (pos_idx, x, y, z, powers) in enumerate(positions):
                 world_corners = np.stack([x, y, z], axis=1) if (isinstance(x, np.ndarray) and isinstance(y, np.ndarray) and isinstance(z, np.ndarray)) else np.array([x, y, z]).T
-                idx_range = f"{pos_idx}-{pos_idx+len(powers)-1}" if len(powers) > 1 else f"{pos_idx}"
+                idx_range = f"{pos_idx[0]}-{pos_idx[-1]}" if len(pos_idx) > 1 else f"{pos_idx[0]}"
                 powers_str = ", ".join(f"{pw:.2f}" for pw in powers)
                 customdata = np.full((world_corners.shape[0], 2), (idx_range, powers_str))
                 trace = go.Scatter3d(
