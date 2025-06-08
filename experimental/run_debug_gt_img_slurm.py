@@ -29,7 +29,7 @@ os.environ['HF_HOME'] = '/home/dcor/orkozlovsky/.cache/huggingface'
 os.environ['PYTHONPATH'] = '/home/dcor/orkozlovsky/repos/relight/:' + os.environ.get('PYTHONPATH', '')
 
 # Build the command to run
-debug_script = 'python relight/training/debug_gt_img.py'
+debug_script = 'python experimental/debug_gt_img.py'
     
 # Submit the job
 job_id = slurm.sbatch(debug_script)
