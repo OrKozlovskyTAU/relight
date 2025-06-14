@@ -535,6 +535,13 @@ def parse_args(input_args=None):
         help="Number of steps between logging gradients and weights to wandb during training.",
     )
 
+    parser.add_argument(
+        "--subset_size",
+        type=int,
+        default=None,
+        help="Number of images in the subset to load (e.g., 1000 for light_positions_1000.csv)."
+    )
+
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:

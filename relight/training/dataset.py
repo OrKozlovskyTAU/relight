@@ -24,7 +24,7 @@ class RelightDataset(Dataset):
     
     def __init__(self, 
                  data_dir: str,
-                 subset_size: int,
+                 subset_size: Optional[int] = None,
                  control_transform: Optional[transforms.Compose] = None,
                  target_transform: Optional[transforms.Compose] = None,
                  image_size: int = 512,
@@ -43,7 +43,7 @@ class RelightDataset(Dataset):
         self.data_dir = Path(data_dir)
         self.image_size = image_size
         self.subset_size = subset_size
-        csv_path = self.data_dir / f"light_positions_{subset_size}.csv"
+        csv_path = self.data_dir / f"light_positions_{subset_size}.csv" if subset_size else self.data_dir / "light_positions.csv"
         if not csv_path.exists():
             raise ValueError(f"Subset CSV {csv_path} not found.")
         with open(csv_path, 'r', newline='') as f:
@@ -90,11 +90,11 @@ class RelightDataset(Dataset):
             Dictionary containing control and target images
         """
         entry = self.entries[idx]
-        # The 'index' field in the CSV is the image base name (e.g., '00001_render_')
-        base_name = entry['index'].replace('_render_', '')
+        # The 'index' field in the CSV is the image base name
+        base_name = int(entry['index'])
         # Compose file names
-        target_path = self.data_dir / f"{base_name}_render_.png"
-        control_path = self.data_dir / f"{base_name}_diffdir_.png"
+        target_path = self.data_dir / f"{base_name:05d}_render_0095.png"
+        control_path = self.data_dir / f"{base_name:05d}_diffdir_0095.png"
         # Load images
         control_image = Image.open(control_path).convert("RGB")
         target_image = Image.open(target_path).convert("RGB")
@@ -118,14 +118,19 @@ def main():
     
     # Create dataset
     dataset = RelightDataset(
-        data_dir=Path("C:/repos/relight/output"),
+        data_dir="/home/dcor/orkozlovsky/repos/relight/data_v2/train",
+        subset_size=5438,
         image_size=256,
         normalize_images=True
     )
     
-    # Get 25 samples
+    # Get 25 random samples
+    num_samples = 25
+    total_len = len(dataset)
+    torch.manual_seed(42)  # For reproducibility
+    indices = torch.randperm(total_len)[:num_samples].tolist()
     samples = []
-    for i in range(25):
+    for i in indices:
         sample = dataset[i]
         # Denormalize images
         control = (sample['conditioning_pixel_values'] + 1) / 2
@@ -146,7 +151,7 @@ def main():
     plt.figure(figsize=(10 * aspect_ratio, 10))
     plt.imshow(grid)
     plt.axis('off')
-    plt.savefig('C:/repos/relight/output/dataset_samples.png')
+    plt.savefig('/home/dcor/orkozlovsky/repos/relight/data_v2/trainset_5438_samples.png')
     plt.close()
 
 if __name__ == "__main__":

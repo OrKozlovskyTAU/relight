@@ -259,6 +259,9 @@ class ControlNetTrainConfig:
     # Number of steps between logging gradients and weights to wandb during training
     log_grad_and_weights_steps: int = 100
 
+    # Number of images to use from the training dataset.
+    subset_size: Optional[int] = None
+
     @staticmethod
     def from_args(args) -> ControlNetTrainConfig:
         # Only keep keys that are fields of ControlNetTrainConfig
@@ -312,6 +315,16 @@ def log_validation(
         normalize_images=False  # Don't normalize for PIL display
     )
 
+    # Shuffle the validation dataset
+    indices = list(range(len(validation_dataset)))
+    if config.seed is not None:
+        g = torch.Generator()
+        g.manual_seed(config.seed)
+        indices = torch.randperm(len(validation_dataset), generator=g).tolist()
+    else:
+        import random
+        random.shuffle(indices)
+
     image_logs = []
     inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
     logger.debug("Using inference context: %s", type(inference_ctx).__name__)
@@ -321,9 +334,8 @@ def log_validation(
     perceptual_losses = []
 
     max_samples = config.max_validation_samples if config.max_validation_samples is not None else len(validation_dataset)
-    for idx, sample in enumerate(validation_dataset):
-        if idx >= max_samples:
-            break
+    for idx in range(max_samples):
+        sample = validation_dataset[indices[idx]]
         logger.debug("Processing validation sample %d/%d", idx + 1, len(validation_dataset))
         control_image_path = os.path.join(config.validation_data_dir, sample['control_file'])
         target_image_path = os.path.join(config.validation_data_dir, sample['target_file'])
@@ -332,7 +344,7 @@ def log_validation(
         target_image = Image.open(target_image_path).convert("RGB")
 
         images = []
-        steps_range = np.linspace(10, config.validation_num_inference_steps, config.num_validation_images, dtype=int)
+        steps_range = np.linspace(20, config.validation_num_inference_steps, config.num_validation_images, dtype=int)
         for i, num_steps in enumerate(steps_range):
             logger.debug("Generating validation image %d/%d for sample %d with %d steps", 
                         i + 1, config.num_validation_images, idx + 1, num_steps)
@@ -354,13 +366,18 @@ def log_validation(
         # Compute MAE and perceptual loss for each generated image vs target
         target_tensor = T.ToTensor()(target_image).unsqueeze(0).to(accelerator.device)
         target_tensor = target_tensor.float()
+        sample_mae_losses = []
+        sample_perceptual_losses = []
         for image in images:
             gen_tensor = T.ToTensor()(image).unsqueeze(0).to(accelerator.device)
             gen_tensor = gen_tensor.float()
             mae = F.l1_loss(gen_tensor, target_tensor).item()
             perceptual = perceptual_loss_fn(gen_tensor, target_tensor).item()
-            mae_losses.append(mae)
-            perceptual_losses.append(perceptual)
+            sample_mae_losses.append(mae)
+            sample_perceptual_losses.append(perceptual)
+        # Take the minimum loss for this sample
+        mae_losses.append(min(sample_mae_losses))
+        perceptual_losses.append(min(sample_perceptual_losses))
 
     tracker_key = "test" if is_final_validation else "validation"
     logger.info("Logging validation results to trackers")
@@ -627,7 +644,8 @@ def main(config: ControlNetTrainConfig):
     train_dataset = RelightDataset(
         data_dir=config.train_data_dir,
         image_size=config.resolution,
-        normalize_images=True
+        normalize_images=True,
+        subset_size=config.subset_size,
     )
     logger.info("Training dataset loaded with %d samples.", len(train_dataset))
 
