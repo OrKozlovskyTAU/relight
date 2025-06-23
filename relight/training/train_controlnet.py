@@ -262,6 +262,19 @@ class ControlNetTrainConfig:
     # Number of images to use from the training dataset.
     subset_size: Optional[int] = None
 
+    # Factor for the zero-frequency extra noise added to latents during training.
+    # This would make it so that the model learns to change the zero-frequency of the component freely,
+    # randomized ~1/`noise_zero_frequency_factor` times faster than for the base distribution.
+    noise_zero_frequency_factor: float = 0.1
+
+    # Rules for step-based learning rate adjustments.
+    # Format depends on the scheduler, e.g., for MultiStepLR, it's a list of epochs.
+    # Example: "10,20,30"
+    step_rules: Optional[str] = None
+
+    # The prediction type for the noise scheduler. Can be 'epsilon' or 'v_prediction'.
+    noise_scheduler_prediction_type: str = "epsilon"
+
     @staticmethod
     def from_args(args) -> ControlNetTrainConfig:
         # Only keep keys that are fields of ControlNetTrainConfig
@@ -507,6 +520,7 @@ def main(config: ControlNetTrainConfig):
     # Load scheduler and models
     logger.info("Loading noise scheduler from: %s", config.pretrained_model_name_or_path)
     noise_scheduler = DDPMScheduler.from_pretrained(config.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler.config.prediction_type = config.noise_scheduler_prediction_type
     logger.info("Noise scheduler config: %s", noise_scheduler.config)
     logger.info("Loading VAE from: %s", config.pretrained_model_name_or_path)
     vae = AutoencoderKL.from_pretrained(
@@ -670,9 +684,11 @@ def main(config: ControlNetTrainConfig):
     else:
         num_training_steps_for_scheduler = config.max_train_steps * accelerator.num_processes
 
+
     lr_scheduler = get_scheduler(
         config.lr_scheduler,
         optimizer=optimizer,
+        step_rules=config.step_rules,
         num_warmup_steps=num_warmup_steps_for_scheduler,
         num_training_steps=num_training_steps_for_scheduler,
         num_cycles=config.lr_num_cycles,
@@ -796,7 +812,7 @@ def main(config: ControlNetTrainConfig):
                 latents = latents * vae.config.scaling_factor
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
+                noise = torch.randn_like(latents) + config.noise_zero_frequency_factor * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device, dtype=latents.dtype)
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
@@ -898,7 +914,7 @@ def main(config: ControlNetTrainConfig):
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if global_step % config.checkpointing_steps == 0:
+                    if config.checkpointing_steps is not None and global_step % config.checkpointing_steps == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if config.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(config.output_dir)

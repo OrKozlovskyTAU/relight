@@ -84,7 +84,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
-        default=500,
+        default=None,
         help=(
             "Save a checkpoint of the training state every X updates. Checkpoints can be used for resuming training via `--resume_from_checkpoint`."
         ),
@@ -153,6 +153,21 @@ def parse_args(input_args=None):
         type=float, 
         default=1.0, 
         help="Power factor of the polynomial scheduler."
+    )
+    
+    parser.add_argument(
+        "--step_rules",
+        type=str,
+        default=None,
+        help="Step rules for schedulers that support it (e.g. '10,20,30' for MultiStepLR milestones).",
+    )
+    
+    parser.add_argument(
+        "--noise_scheduler_prediction_type",
+        type=str,
+        default="epsilon",
+        choices=["epsilon", "v_prediction"],
+        help="The prediction type for the noise scheduler.",
     )
     
     # ControlNet specific arguments
@@ -540,6 +555,13 @@ def parse_args(input_args=None):
         type=int,
         default=None,
         help="Number of images in the subset to load (e.g., 1000 for light_positions_1000.csv)."
+    )
+
+    parser.add_argument(
+        "--noise_zero_frequency_factor",
+        type=float,
+        default=0.1,
+        help="Factor for the zero-frequency extra noise added to latents during training (default: 0.1)",
     )
 
     if input_args is not None:
