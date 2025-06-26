@@ -197,6 +197,12 @@ def parse_args(input_args=None):
     
     # Additional training configuration
     parser.add_argument(
+        "--lab_color_match_logging",
+        type=lambda x: str(x).lower() == 'true',
+        default=False,
+        help="Enable LAB color matching for logging images during training and validation. Accepts True or False.",
+    )
+    parser.add_argument(
         "--mixed_precision",
         type=str,
         default=None,

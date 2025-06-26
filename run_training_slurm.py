@@ -53,33 +53,23 @@ os.environ['PYTHONPATH'] = '/home/dcor/orkozlovsky/repos/relight/:' + os.environ
 loss_weight_combinations = [
     # (mse_loss_weight, mae_loss_weight, perceptual_loss_weight)
     (1.0, 0.0, 0.0),
-    # (0.0, 1.0, 0.0),
-    # (0.0, 0.0, 1.0),
-    # (0.5, 0.5, 0.0),
-    # (0.0, 0.5, 0.5),
-    # (0.5, 0.0, 0.5),
-    # (0.33, 0.33, 0.34),
 ]
 
 # Zero frequency factors to try
 zero_frequency_factors = [
-    # 0.0,
     0.4,
-    # 0.5,
-    # 0.6,
 ]
 
 learning_rates = [
-    # 1e-4,
-    1e-5,
-    1e-6,
+    5e-4,
 ]
-
+            
 i = 0
 # Submit a SLURM job for each value of noise_zero_frequency_factor
 for mse_loss_weight, mae_loss_weight, perceptual_loss_weight in loss_weight_combinations:
     for noise_zero_frequency_factor in zero_frequency_factors:
         for learning_rate in learning_rates:
+        
             i += 1
             # Unique output directory and slurm output/error files per job
             job_suffix = f"mse{mse_loss_weight}_mae{mae_loss_weight}_perc{perceptual_loss_weight}_noise{noise_zero_frequency_factor}_lr{learning_rate}"
@@ -97,7 +87,7 @@ for mse_loss_weight, mae_loss_weight, perceptual_loss_weight in loss_weight_comb
             --num_machines=1 \
             --mixed_precision=no \
             --dynamo_backend=no \
-            --main_process_port={15000 + i * 10} \
+            --main_process_port={10000 + i * 10} \
             relight/training/train_controlnet.py \
             --pretrained_model_name_or_path="stable-diffusion-v1-5/stable-diffusion-v1-5" \
             --output_dir="{output_dir}" \
@@ -107,12 +97,11 @@ for mse_loss_weight, mae_loss_weight, perceptual_loss_weight in loss_weight_comb
             --max_validation_samples=20 \
             --resolution=512 \
             --learning_rate={learning_rate} \
-            --lr_scheduler="piecewise_constant" \
-            --step_rules="1:8000,0.1" \
+            --lr_scheduler="constant" \
             --lr_warmup_steps=0 \
             --train_batch_size=4 \
-            --max_train_steps=20000 \
-            --validation_steps=2000 \
+            --max_train_steps=10000 \
+            --validation_steps=1000 \
             --log_training_image_steps=150000 \
             --log_grad_and_weights_steps=1000 \
             --num_validation_images=3 \
@@ -121,7 +110,8 @@ for mse_loss_weight, mae_loss_weight, perceptual_loss_weight in loss_weight_comb
             --mae_loss_weight={mae_loss_weight} \
             --perceptual_loss_weight={perceptual_loss_weight} \
             --noise_zero_frequency_factor={noise_zero_frequency_factor} \
-            --noise_scheduler_prediction_type="v_prediction"'
+            --noise_scheduler_prediction_type="epsilon" \
+            --lab_color_match_logging=True'
 
             # Ensure output directory exists
             os.makedirs(output_dir, exist_ok=True)

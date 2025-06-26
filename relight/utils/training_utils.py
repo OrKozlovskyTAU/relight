@@ -12,18 +12,19 @@ import numpy as np
 from pathlib import Path
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import set_seed
+from accelerate.utils import set_seed, ProjectConfiguration, DistributedDataParallelKwargs
 from diffusers.utils import make_image_grid, is_wandb_available
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.torch_utils import is_compiled_module
 from huggingface_hub import create_repo
-from accelerate import DistributedDataParallelKwargs, ProjectConfiguration
 import transformers
 import diffusers
 import accelerate
 from transformers import AutoTokenizer, CLIPTextModel, T5EncoderModel
 import copy
 from packaging import version
+from skimage.color import rgb2lab, lab2rgb
+from color_transfer import color_transfer
 
 logger = get_logger(__name__)
 
@@ -415,4 +416,26 @@ def setup_training(args, accelerator, transformer, vae, controlnet, weight_dtype
     else:
         vae.to(accelerator.device, dtype=weight_dtype)
     transformer.to(accelerator.device, dtype=weight_dtype)
+    
+def color_match_lab(pred, inp):
+    """
+    Color-match the prediction to the input image in LAB color space using Reinhard's method.
+    Args:
+        pred: np.ndarray, shape (H, W, 3), RGB, range [0, 1] or [0, 255]
+        inp: np.ndarray, shape (H, W, 3), RGB, range [0, 1] or [0, 255]
+    Returns:
+        np.ndarray, shape (H, W, 3), RGB, same dtype/range as input
+    """
+    # Ensure float and [0, 1] range for color_transfer
+    pred = pred.astype(np.float32)
+    inp = inp.astype(np.float32)
+    if pred.max() > 1.1 or inp.max() > 1.1:
+        pred = pred / 255.0
+        inp = inp / 255.0
+
+    matched = color_transfer(source=inp, target=pred)
+    # Convert back to [0, 255] if needed
+    if inp.max() > 1.1:
+        matched = (matched * 255).astype(np.uint8)
+    return matched
     

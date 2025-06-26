@@ -20,6 +20,7 @@ import gc
 import logging
 import math
 import os
+import sys
 import shutil
 from pathlib import Path
 
@@ -71,6 +72,8 @@ import tempfile
 import pickle
 import time
 from plotly.subplots import make_subplots
+
+from relight.utils.training_utils import color_match_lab
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.34.0.dev0")
@@ -275,11 +278,23 @@ class ControlNetTrainConfig:
     # The prediction type for the noise scheduler. Can be 'epsilon' or 'v_prediction'.
     noise_scheduler_prediction_type: str = "epsilon"
 
+    # If True, apply LAB color matching to generated images before logging (validation and training logs)
+    lab_color_match_logging: bool = False
+
+    # If True, initialize config from wandb.config for sweep agent mode
+    wandb_sweep_agent: bool = False
+
     @staticmethod
     def from_args(args) -> ControlNetTrainConfig:
         # Only keep keys that are fields of ControlNetTrainConfig
         valid_keys = set(ControlNetTrainConfig.__dataclass_fields__.keys())
         filtered_args = {k: v for k, v in vars(args).items() if k in valid_keys}
+        return ControlNetTrainConfig(**filtered_args)
+
+    @staticmethod
+    def from_wandb_config(wandb_config) -> ControlNetTrainConfig:
+        valid_keys = set(ControlNetTrainConfig.__dataclass_fields__.keys())
+        filtered_args = {k: v for k, v in dict(wandb_config).items() if k in valid_keys}
         return ControlNetTrainConfig(**filtered_args)
 
 
@@ -345,6 +360,7 @@ def log_validation(
     perceptual_loss_fn = get_vgg_perceptual_loss(accelerator.device)
     mae_losses = []
     perceptual_losses = []
+    mse_losses = []
 
     max_samples = config.max_validation_samples if config.max_validation_samples is not None else len(validation_dataset)
     for idx in range(max_samples):
@@ -368,6 +384,8 @@ def log_validation(
                     num_inference_steps=num_steps,
                     generator=generator
                 ).images[0]
+            if config.lab_color_match_logging:
+                image = color_match_lab(np.array(image), np.array(control_image)); image = Image.fromarray((image * 255).astype(np.uint8)) if image.max() <= 1.0 else Image.fromarray(image.astype(np.uint8))
             images.append(image)
 
         # Combine target image, control image, and generated images
@@ -376,21 +394,25 @@ def log_validation(
             {"images": combined_images}
         )
 
-        # Compute MAE and perceptual loss for each generated image vs target
+        # Compute MAE, perceptual, and MSE loss for each generated image vs target
         target_tensor = T.ToTensor()(target_image).unsqueeze(0).to(accelerator.device)
         target_tensor = target_tensor.float()
         sample_mae_losses = []
         sample_perceptual_losses = []
+        sample_mse_losses = []
         for image in images:
             gen_tensor = T.ToTensor()(image).unsqueeze(0).to(accelerator.device)
             gen_tensor = gen_tensor.float()
             mae = F.l1_loss(gen_tensor, target_tensor).item()
             perceptual = perceptual_loss_fn(gen_tensor, target_tensor).item()
+            mse = F.mse_loss(gen_tensor, target_tensor).item()
             sample_mae_losses.append(mae)
             sample_perceptual_losses.append(perceptual)
+            sample_mse_losses.append(mse)
         # Take the minimum loss for this sample
         mae_losses.append(min(sample_mae_losses))
         perceptual_losses.append(min(sample_perceptual_losses))
+        mse_losses.append(min(sample_mse_losses))
 
     tracker_key = "test" if is_final_validation else "validation"
     logger.info("Logging validation results to trackers")
@@ -401,6 +423,10 @@ def log_validation(
                 images = log["images"]
                 formatted_images = np.stack([np.asarray(img) for img in images])
                 tracker.writer.add_images("validation", formatted_images, step, dataformats="NHWC")
+            # Log losses to tensorboard
+            tracker.writer.add_scalar(f"{tracker_key}/mae_loss", np.mean(mae_losses), step)
+            tracker.writer.add_scalar(f"{tracker_key}/perceptual_loss", np.mean(perceptual_losses), step)
+            tracker.writer.add_scalar(f"{tracker_key}/mse_loss", np.mean(mse_losses), step)
         elif tracker.name == "wandb":
             formatted_images = []
             for log in image_logs:
@@ -429,7 +455,7 @@ def log_validation(
                 formatted_images.append(
                     wandb.Image(concat_image)
                 )
-            tracker.log({tracker_key: formatted_images, tracker_key + "/mae_loss": np.mean(mae_losses), tracker_key + "/perceptual_loss": np.mean(perceptual_losses)})
+            tracker.log({tracker_key: formatted_images, tracker_key + "/mae_loss": np.mean(mae_losses), tracker_key + "/perceptual_loss": np.mean(perceptual_losses), tracker_key + "/mse_loss": np.mean(mse_losses)})
         else:
             logger.warning(f"image logging not implemented for {tracker.name}")
 
@@ -988,7 +1014,13 @@ def main(config: ControlNetTrainConfig):
                             # Clamp and convert to uint8
                             gen_img = torch.clamp(gen_img, 0, 1)
                             gt_img = torch.clamp(gt_img, 0, 1)
-                            gen_img_pil = T.ToPILImage()(gen_img)
+                            if config.lab_color_match_logging:
+                                gen_img_np = gen_img.permute(1, 2, 0).numpy()  # (H, W, 3)
+                                gt_img_np = gt_img.permute(1, 2, 0).numpy()    # (H, W, 3)
+                                gen_img_np = color_match_lab(gen_img_np, gt_img_np)
+                                gen_img_pil = T.ToPILImage()(torch.from_numpy(gen_img_np.transpose(2, 0, 1)))
+                            else:
+                                gen_img_pil = T.ToPILImage()(gen_img)
                             gt_img_pil = T.ToPILImage()(gt_img)
                             # Concatenate side by side
                             concat = Image.new('RGB', (gen_img_pil.width + gt_img_pil.width, gen_img_pil.height))
@@ -1121,6 +1153,16 @@ def main(config: ControlNetTrainConfig):
 
 
 if __name__ == "__main__":
+    # To use with wandb sweeps, run:
+    #   wandb sweep wandb_sweep.yaml
+    #   wandb agent <sweep_id>
+    # if 'wandb' in sys.modules:
     args = parse_args()
     config = ControlNetTrainConfig.from_args(args)
+    print(config)
+    if config.wandb_sweep_agent:
+        wandb.login(key=get_wandb_key())
+        wandb.init(project=config.tracker_project_name)
+        config = ControlNetTrainConfig.from_wandb_config(wandb.config)
+
     main(config)
