@@ -1,6 +1,7 @@
 import argparse
 import os
 
+
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Training script for ControlNet models.")
     
@@ -160,14 +161,6 @@ def parse_args(input_args=None):
         type=str,
         default=None,
         help="Step rules for schedulers that support it (e.g. '10,20,30' for MultiStepLR milestones).",
-    )
-    
-    parser.add_argument(
-        "--noise_scheduler_prediction_type",
-        type=str,
-        default="epsilon",
-        choices=["epsilon", "v_prediction"],
-        help="The prediction type for the noise scheduler.",
     )
     
     # ControlNet specific arguments
@@ -512,8 +505,8 @@ def parse_args(input_args=None):
         "--model_type",
         type=str,
         default="sd3",
-        choices=["sd3", "flux", "sd"],
-        help="Type of ControlNet model to train: 'sd3' for standard ControlNet, 'flux' for Flux ControlNet, or 'sd' for ControlNet with null text embeddings.",
+        choices=["sd3", "flux", "sd15", "sd21"],
+        help="Type of ControlNet model to train: 'sd3' for standard ControlNet, 'flux' for Flux ControlNet, 'sd15' for SD 1.5 ControlNet, or 'sd21' for SD 2.1 ControlNet.",
     )
     parser.add_argument(
         "--validation_num_inference_steps",
@@ -529,30 +522,12 @@ def parse_args(input_args=None):
         default=1.0,
         help="Weight for the MSE loss component.",
     )
-    parser.add_argument(
-        "--mae_loss_weight",
-        type=float,
-        default=0.0,
-        help="Weight for the MAE loss component.",
-    )
-    parser.add_argument(
-        "--perceptual_loss_weight",
-        type=float,
-        default=0.0,
-        help="Weight for the perceptual (VGG) loss component.",
-    )
 
     # Additional arguments from train_controlnet_flux.py
     parser.add_argument(
-        "--log_training_image_steps",
-        type=int,
-        default=1000,
-        help="Number of steps between logging generated/gt image pairs to wandb during training.",
-    )
-    parser.add_argument(
         "--log_grad_and_weights_steps",
         type=int,
-        default=100,
+        default=None,
         help="Number of steps between logging gradients and weights to wandb during training.",
     )
 
@@ -614,9 +589,16 @@ def main():
         from relight.training.train_controlnet_flux import main as train_flux
         train_flux(args)
     elif args.model_type == "sd":
-        from relight.training.train_controlnet import main, ControlNetTrainConfig
+        from relight.training.train_controlnet import ControlNetTrainConfig, main
         config = ControlNetTrainConfig.from_args(args)
         main(config)
+    elif args.model_type == "sd15":
+        from relight.training.train_controlnet import ControlNetTrainConfig, main
+        config = ControlNetTrainConfig.from_args(args)
+        main(config)
+    elif args.model_type == "sd21":
+        from relight.training.train_controlnet_sd21 import main as train_sd21
+        train_sd21(args)
     else:
         raise ValueError(f"Unknown model type: {args.model_type}")
 

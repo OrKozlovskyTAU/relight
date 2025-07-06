@@ -1,21 +1,21 @@
+import csv
+import logging
+import os
+from math import pi
+
 import bpy
 import numpy as np
 from mathutils import Vector
-import csv
-import os
-import random
-import logging
 
+from relight.utils.blender_plotly_vis import plot_light_positions_with_scene
 from relight.utils.blender_utils import (
-    setup_gpu_rendering,
     get_area_light_size,
-    orient_area_light_toward_point,
-    get_object_bbox_center_and_corners,
     get_cornell_faces,
     get_facing_point,
+    get_object_bbox_center_and_corners,
+    orient_area_light_toward_point,
+    setup_gpu_rendering,
 )
-from relight.utils.blender_plotly_vis import plot_light_positions_with_scene
-from math import pi
 
 # Set up logging
 logging.basicConfig(

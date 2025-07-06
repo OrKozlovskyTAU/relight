@@ -1,7 +1,5 @@
-from time import sleep
 from simple_slurm import Slurm
 import os
-from itertools import product
 
 # -----------------------------------------------------------------
 
@@ -28,7 +26,10 @@ slurm = Slurm(
     output='slurm/%j.out',
     error='slurm/%j.err',
     time='24:00:00',
-    gres='gpu:1',
+    gres='gpu:2',
+    nodes=1,
+    ntasks_per_node=2,
+    cpus_per_task=8,
     mem='48G',
     partition='killable',
     account='gpu-research',
@@ -49,12 +50,6 @@ os.environ['HF_HOME'] = '/home/dcor/orkozlovsky/.cache/huggingface'
 # Add relight source directory to PYTHONPATH
 os.environ['PYTHONPATH'] = '/home/dcor/orkozlovsky/repos/relight/:' + os.environ.get('PYTHONPATH', '')
 
-# Define combinations of loss weights to try
-loss_weight_combinations = [
-    # (mse_loss_weight, mae_loss_weight, perceptual_loss_weight)
-    (1.0, 0.0, 0.0),
-]
-
 # Zero frequency factors to try
 zero_frequency_factors = [
     0.4,
@@ -63,62 +58,72 @@ zero_frequency_factors = [
 learning_rates = [
     5e-4,
 ]
-            
+
+# Model settings for easy configuration
+MODEL_SETTINGS = {
+    "sd15": {
+        "model_type": "sd15",
+        "pretrained_model_name_or_path": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+        "resolution": 512,
+        "train_batch_size": 4,
+    },
+    "sd21": {
+        "model_type": "sd21",
+        "pretrained_model_name_or_path": "stabilityai/stable-diffusion-2-1",
+        "resolution": 768,
+        "train_batch_size": 2,
+    },
+}
+
+# Select which model to use: "sd15" or "sd21"
+SELECTED_MODEL = "sd21"
+model_cfg = MODEL_SETTINGS[SELECTED_MODEL]
+
 i = 0
 # Submit a SLURM job for each value of noise_zero_frequency_factor
-for mse_loss_weight, mae_loss_weight, perceptual_loss_weight in loss_weight_combinations:
-    for noise_zero_frequency_factor in zero_frequency_factors:
-        for learning_rate in learning_rates:
-        
-            i += 1
-            # Unique output directory and slurm output/error files per job
-            job_suffix = f"mse{mse_loss_weight}_mae{mae_loss_weight}_perc{perceptual_loss_weight}_noise{noise_zero_frequency_factor}_lr{learning_rate}"
-            output_dir = f"models/controlnet_{job_suffix}"
-            slurm_output = f"slurm/%j_{job_suffix}.out"
-            slurm_error = f"slurm/%j_{job_suffix}.err"
+for noise_zero_frequency_factor in zero_frequency_factors:
+    for learning_rate in learning_rates:
+    
+        i += 1
+        # Unique output directory and slurm output/error files per job
+        job_suffix = f"{model_cfg['model_type']}_noise{noise_zero_frequency_factor}_lr{learning_rate}"
+        output_dir = f"models/controlnet_{job_suffix}"
+        slurm_output = f"slurm/%j_{job_suffix}.out"
+        slurm_error = f"slurm/%j_{job_suffix}.err"
 
-            # Update slurm object for this job
-            slurm.output = slurm_output
-            slurm.error = slurm_error
+        # Update slurm object for this job
+        slurm.output = slurm_output
+        slurm.error = slurm_error
 
-            # Build the command for this job
-            train_script = f'accelerate launch \
-            --num_processes=1 \
-            --num_machines=1 \
-            --mixed_precision=no \
-            --dynamo_backend=no \
-            --main_process_port={10000 + i * 10} \
-            relight/training/train_controlnet.py \
-            --pretrained_model_name_or_path="stable-diffusion-v1-5/stable-diffusion-v1-5" \
-            --output_dir="{output_dir}" \
-            --train_data_dir="data_v2/train" \
-            --validation_data_dir="data_v2/val" \
-            --subset_size=5438 \
-            --max_validation_samples=20 \
-            --resolution=512 \
-            --learning_rate={learning_rate} \
-            --lr_scheduler="constant" \
-            --lr_warmup_steps=0 \
-            --train_batch_size=4 \
-            --max_train_steps=10000 \
-            --validation_steps=1000 \
-            --log_training_image_steps=150000 \
-            --log_grad_and_weights_steps=1000 \
-            --num_validation_images=3 \
-            --validation_num_inference_steps=50 \
-            --mse_loss_weight={mse_loss_weight} \
-            --mae_loss_weight={mae_loss_weight} \
-            --perceptual_loss_weight={perceptual_loss_weight} \
-            --noise_zero_frequency_factor={noise_zero_frequency_factor} \
-            --noise_scheduler_prediction_type="epsilon" \
-            --lab_color_match_logging=True'
+        # Build the command for this job
+        train_script = f'accelerate launch \
+--config_file accelerate_config.yaml \
+--main_process_port {30000 + i * 10} \
+relight/training/train_controlnet.py \
+--model_type="{model_cfg["model_type"]}" \
+--pretrained_model_name_or_path="{model_cfg["pretrained_model_name_or_path"]}" \
+--output_dir="{output_dir}" \
+--train_data_dir="data_v2/train" \
+--validation_data_dir="data_v2/val" \
+--subset_size=5438 \
+--max_validation_samples=20 \
+--resolution={model_cfg["resolution"]} \
+--learning_rate={learning_rate} \
+--lr_scheduler="constant" \
+--lr_warmup_steps=0 \
+--train_batch_size={model_cfg["train_batch_size"]} \
+--max_train_steps=10000 \
+--validation_steps=1000 \
+--log_grad_and_weights_steps=1000 \
+--num_validation_images=3 \
+--validation_num_inference_steps=50 \
+--noise_zero_frequency_factor={noise_zero_frequency_factor} \
+--lab_color_match_logging=True'
 
-            # Ensure output directory exists
-            os.makedirs(output_dir, exist_ok=True)
 
-            # Submit the job
-            job_id = slurm.sbatch(train_script)
-            print(f"Submitted SLURM job {job_id} for loss weights: mse={mse_loss_weight}, mae={mae_loss_weight}, perc={perceptual_loss_weight}, noise_zero_frequency_factor={noise_zero_frequency_factor}")
-            print(f"SLURM output will be in: slurm/{job_id}_{job_suffix}.out")
-            print("command: ", train_script)
-            # sleep(120)
+        # Submit the job
+        job_id = slurm.sbatch(train_script)
+        print(f"Submitted SLURM job {job_id} for noise_zero_frequency_factor={noise_zero_frequency_factor}")
+        print(f"SLURM output will be in: slurm/{job_id}_{job_suffix}.out")
+        print("command: ", train_script)
+        # sleep(120)

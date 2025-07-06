@@ -1,16 +1,17 @@
-import bpy
-from pathlib import Path
-import numpy as np
-from PIL import Image
-import OpenEXR
-import Imath
 import multiprocessing as mp
+from pathlib import Path
+
+import bpy
+import Imath
+import numpy as np
+import OpenEXR
+from PIL import Image
 
 from relight.utils.blender_utils import (
     get_scene_resolution,
     load_texture,
+    setup_gpu_rendering,
     swap_projector_texture,
-    setup_gpu_rendering
 )
 
 
@@ -81,8 +82,8 @@ def generate_transport_matrix(proj_resx=64, proj_resy=64, overwrite=False, batch
         
         for i in range(total_images):
             # Calculate x and y coordinates
-            y = i // proj_resx
-            x = i % proj_resx
+            i // proj_resx
+            i % proj_resx
             
             # Construct the texture path and key
             texture_path = bf_path / f"BF_{i:05d}.png"

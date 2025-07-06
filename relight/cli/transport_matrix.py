@@ -6,14 +6,13 @@ This script provides a command-line interface for generating and using transport
 """
 
 import argparse
-import bpy
-from pathlib import Path
+
 
 from relight.dataset.transport_matrix import (
-    generate_transport_matrix,
     calculate_transport_matrix,
+    generate_transport_matrix,
+    load_transport_matrix,
     save_transport_matrix,
-    load_transport_matrix
 )
 
 

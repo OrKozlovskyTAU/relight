@@ -12,6 +12,7 @@ relight/utils/wandb_key.py
 models
 slurm
 wandb
+original_scripts
 *.pkl
 *.pt
 *.safetensors

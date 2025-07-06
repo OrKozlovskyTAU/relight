@@ -1,9 +1,10 @@
-import bpy
-from pathlib import Path
-import numpy as np
-from PIL import Image
-from mathutils import Vector, Matrix
 import logging
+from pathlib import Path
+
+import bpy
+import numpy as np
+from mathutils import Matrix, Vector
+from PIL import Image
 
 
 def get_active_object():
@@ -162,7 +163,7 @@ def orient_area_light_toward_point(light_obj, facing_point, set_matrix_world=Tru
     direction = Vector(facing_point) - light_obj.location
     direction.normalize()
     # Default area light normal is (0, 0, -1) in local space
-    up = Vector((0, 1, 0))
+    Vector((0, 1, 0))
     normal = direction
     # Compute rotation matrix to align -Z to normal
     rot = normal.to_track_quat('-Z', 'Y').to_matrix().to_4x4()

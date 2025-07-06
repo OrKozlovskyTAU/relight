@@ -5,12 +5,17 @@ Light Dataset CLI
 This script provides a command-line interface for generating light datasets (train and validation) with configurable light sources.
 """
 
-import os
 import argparse
-from pathlib import Path
+import os
 import sys
+from pathlib import Path
 
 import numpy as np
+
+from relight.dataset.light_dataset import (
+    LightSourceConfiguration,
+    generate_light_dataset,
+)
 
 # Add relight source directory to PYTHONPATH
 repo_root = '/home/dcor/orkozlovsky/repos/relight/'
@@ -24,7 +29,6 @@ if os.path.exists(site_packages):
     print(f"Adding {site_packages} to sys.path")
     sys.path.append(site_packages)
 
-from relight.dataset.light_dataset import generate_light_dataset, LightSourceConfiguration
 
 def parse_args():
     """Parse command line arguments."""

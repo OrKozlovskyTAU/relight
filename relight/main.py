@@ -6,11 +6,18 @@ This script provides a command-line interface for the Relight project.
 """
 
 import argparse
-import bpy
-import sys
 import os
+import sys
 from pathlib import Path
 
+
+from relight.dataset.light_dataset import generate_light_dataset
+from relight.dataset.transport_matrix import (
+    calculate_transport_matrix,
+    generate_transport_matrix,
+    load_transport_matrix,
+    save_transport_matrix,
+)
 
 # Add the conda environment path
 site_packages = os.path.join('/home/dcor/orkozlovsky/miniconda3/envs/relight_blender/', 'lib', 'python3.10', 'site-packages')
@@ -22,13 +29,6 @@ if os.path.exists(site_packages):
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
-from relight.dataset.transport_matrix import (
-    generate_transport_matrix,
-    calculate_transport_matrix,
-    save_transport_matrix,
-    load_transport_matrix
-)
-from relight.dataset.light_dataset import generate_light_dataset
 
 
 def parse_args():

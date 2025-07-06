@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 import torch
 from diffusers import AutoencoderKL
 from relight.training.dataset import RelightDataset

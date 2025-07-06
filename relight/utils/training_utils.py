@@ -4,27 +4,27 @@ Common training utilities for Relight models.
 This module contains utility functions used across different training scripts.
 """
 
+import logging
 import os
 import shutil
-import logging
-import torch
-import numpy as np
 from pathlib import Path
+
+import accelerate
+import diffusers
+import numpy as np
+import torch
+import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import set_seed, ProjectConfiguration, DistributedDataParallelKwargs
-from diffusers.utils import make_image_grid, is_wandb_available
-from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
-from diffusers.utils.torch_utils import is_compiled_module
-from huggingface_hub import create_repo
-import transformers
-import diffusers
-import accelerate
-from transformers import AutoTokenizer, CLIPTextModel, T5EncoderModel
-import copy
-from packaging import version
-from skimage.color import rgb2lab, lab2rgb
+from accelerate.utils import (
+    DistributedDataParallelKwargs,
+    ProjectConfiguration,
+    set_seed,
+)
 from color_transfer import color_transfer
+from diffusers.utils import is_wandb_available
+from diffusers.utils.torch_utils import is_compiled_module
+from packaging import version
 
 logger = get_logger(__name__)
 
@@ -33,51 +33,6 @@ def unwrap_model(accelerator, model):
     model = accelerator.unwrap_model(model)
     model = model._orig_mod if is_compiled_module(model) else model
     return model
-
-def save_model_card(repo_id: str, image_logs=None, base_model=str, repo_folder=None):
-    """Save a model card with example images."""
-    img_str = ""
-    if image_logs is not None:
-        img_str = "You can find some example images below.\n\n"
-        for i, log in enumerate(image_logs):
-            images = log["images"]
-            validation_data_dir = log["validation_data_dir"]
-            validation_data_dir.save(os.path.join(repo_folder, "image_control.png"))
-            images = [validation_data_dir] + images
-            make_image_grid(images, 1, len(images)).save(os.path.join(repo_folder, f"images_{i}.png"))
-            img_str += f"![images_{i})](./images_{i}.png)\n"
-
-    model_description = f"""
-# controlnet-{repo_id}
-
-These are controlnet weights trained on {base_model} with new type of conditioning.
-{img_str}
-
-## License
-
-Please adhere to the licensing terms as described [here](https://huggingface.co/black-forest-labs/FLUX.1-dev/blob/main/LICENSE.md)
-"""
-
-    model_card = load_or_create_model_card(
-        repo_id_or_path=repo_id,
-        from_training=True,
-        license="other",
-        base_model=base_model,
-        model_description=model_description,
-        inference=True,
-    )
-
-    tags = [
-        "flux",
-        "flux-diffusers",
-        "text-to-image",
-        "diffusers",
-        "controlnet",
-        "diffusers-training",
-    ]
-    model_card = populate_model_card(model_card, tags=tags)
-
-    model_card.save(os.path.join(repo_folder, "README.md"))
 
 def get_sigmas(timesteps, noise_scheduler_copy, n_dim=4, dtype=torch.float32, device=None):
     """Get sigma values for timesteps."""
@@ -222,79 +177,6 @@ def validate_training_args(args):
     
     return True
 
-def load_models(args, logger, model_type="sd3"):
-    """
-    Load essential models for training.
-    
-    Args:
-        args: Training arguments
-        logger: Logger instance
-        model_type: Either "sd3" or "flux" to determine which models to load
-        
-    Returns:
-        Tuple of (models, schedulers) where models is a tuple of (vae, transformer, controlnet)
-        and schedulers is a tuple of (noise_scheduler, noise_scheduler_copy)
-    """
-    if model_type == "sd3":
-        # Load scheduler and models
-        noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="scheduler"
-        )
-        noise_scheduler_copy = copy.deepcopy(noise_scheduler)
-        
-        vae = AutoencoderKL.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="vae",
-            revision=args.revision,
-            variant=args.variant,
-        )
-        transformer = SD3Transformer2DModel.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant
-        )
-
-        if args.controlnet_model_name_or_path:
-            logger.info("Loading existing controlnet weights")
-            controlnet = SD3ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
-        else:
-            logger.info("Initializing controlnet weights from transformer")
-            controlnet = SD3ControlNetModel.from_transformer(
-                transformer, num_extra_conditioning_channels=args.num_extra_conditioning_channels
-            )
-    else:  # flux
-        vae = AutoencoderKL.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="vae",
-            revision=args.revision,
-            variant=args.variant,
-        )
-        transformer = FluxTransformer2DModel.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="transformer",
-            revision=args.revision,
-            variant=args.variant,
-        )
-        if args.controlnet_model_name_or_path:
-            logger.info("Loading existing controlnet weights")
-            controlnet = FluxControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
-        else:
-            logger.info("Initializing controlnet weights from transformer")
-            controlnet = FluxControlNetModel.from_transformer(
-                transformer,
-                attention_head_dim=transformer.config["attention_head_dim"],
-                num_attention_heads=transformer.config["num_attention_heads"],
-                num_layers=args.num_double_layers,
-                num_single_layers=args.num_single_layers,
-            )
-        logger.info("all models loaded successfully")
-
-        noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="scheduler",
-        )
-        noise_scheduler_copy = copy.deepcopy(noise_scheduler)
-
-    return (vae, transformer, controlnet), (noise_scheduler, noise_scheduler_copy)
-
 def create_model_hooks(accelerator, args, models, model_type="sd3"):
     """
     Create model hooks for saving and loading models.
@@ -333,7 +215,9 @@ def create_model_hooks(accelerator, args, models, model_type="sd3"):
                     from diffusers import SD3ControlNetModel
                     load_model = SD3ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
                 else:
-                    from diffusers.models.controlnets.controlnet_flux import FluxControlNetModel
+                    from diffusers.models.controlnets.controlnet_flux import (
+                        FluxControlNetModel,
+                    )
                     load_model = FluxControlNetModel.from_pretrained(input_dir, subfolder="flux_controlnet")
                 
                 model.register_to_config(**load_model.config)
@@ -357,66 +241,7 @@ def setup_weight_dtype(args, accelerator):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
     return weight_dtype
-
-def setup_training(args, accelerator, transformer, vae, controlnet, weight_dtype, model_type="sd3"):
-    transformer.requires_grad_(False)
-    vae.requires_grad_(False)
-    controlnet.train()
-    
-    if model_type == "flux":
-        if args.enable_npu_flash_attention:
-            if is_torch_npu_available():
-                logger.info("npu flash attention enabled.")
-                transformer.enable_npu_flash_attention()
-            else:
-                raise ValueError("npu flash attention requires torch_npu extensions and is supported only on npu devices.")
-
-        if args.enable_xformers_memory_efficient_attention:
-            if is_xformers_available():
-                import xformers
-
-                xformers_version = version.parse(xformers.__version__)
-                if xformers_version == version.parse("0.0.16"):
-                    logger.warning(
-                        "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                    )
-                transformer.enable_xformers_memory_efficient_attention()
-                controlnet.enable_xformers_memory_efficient_attention()
-            else:
-                raise ValueError("xformers is not available. Make sure it is installed correctly")
-
-    if args.gradient_checkpointing:
-        if model_type == "flux":
-            transformer.enable_gradient_checkpointing()
-        controlnet.enable_gradient_checkpointing()
-    
-    # Check that all trainable models are in full precision
-    if unwrap_model(controlnet).dtype != torch.float32:
-        low_precision_error_string = (
-            " Please make sure to always have all model weights in full float32 precision when starting training - even if"
-            " doing mixed precision training, copy of the weights should still be float32."
-        )
-        raise ValueError(
-            f"Controlnet loaded as datatype {unwrap_model(controlnet).dtype}. {low_precision_error_string}"
-        )
-
-    # Enable TF32 for faster training on Ampere GPUs,
-    # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
-    if args.allow_tf32:
-        torch.backends.cuda.matmul.allow_tf32 = True
-
-    if args.scale_lr:
-        args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
-        )
-    
-    # Move vae and transformer to device and cast to weight_dtype
-    if args.upcast_vae:
-        vae.to(accelerator.device, dtype=torch.float32)
-    else:
-        vae.to(accelerator.device, dtype=weight_dtype)
-    transformer.to(accelerator.device, dtype=weight_dtype)
-    
+   
 def color_match_lab(pred, inp):
     """
     Color-match the prediction to the input image in LAB color space using Reinhard's method.
@@ -438,4 +263,3 @@ def color_match_lab(pred, inp):
     if inp.max() > 1.1:
         matched = (matched * 255).astype(np.uint8)
     return matched
-    

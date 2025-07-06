@@ -3,9 +3,8 @@ import pickle
 import plotly.graph_objs as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
-from collections import defaultdict
 
-pkl_path = "/home/dcor/orkozlovsky/repos/relight/models/controlnet/plotly_debug_latest.pkl"  # <-- Change this to your actual file
+pkl_path = "/home/dcor/orkozlovsky/repos/relight/trainers/controlnet/plotly_debug_latest.pkl"  # <-- Change this to your actual file
 with open(pkl_path, 'rb') as f:
     data = pickle.load(f)
 

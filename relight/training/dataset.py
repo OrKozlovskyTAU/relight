@@ -5,14 +5,15 @@ This module provides dataset classes for loading and preprocessing image pairs
 for training ControlNet and other models.
 """
 
-from typing import Optional, Dict
-import torch
-from torch.utils.data import Dataset
-from PIL import Image
-import torchvision.transforms as transforms
+import csv
 import logging
 from pathlib import Path
-import csv
+from typing import Dict, Optional
+
+import torch
+import torchvision.transforms as transforms
+from PIL import Image
+from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
@@ -112,10 +113,10 @@ class RelightDataset(Dataset):
 
 def main():
     """Debug function to visualize dataset samples."""
-    from torchvision.utils import make_grid
     import matplotlib.pyplot as plt
     import torch
-    
+    from torchvision.utils import make_grid
+
     # Create dataset
     dataset = RelightDataset(
         data_dir="/home/dcor/orkozlovsky/repos/relight/data_v2/train",

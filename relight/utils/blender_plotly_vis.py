@@ -1,9 +1,12 @@
-import bpy
+import csv
+import logging
 import os
 import sys
-import logging
-import csv
 from pathlib import Path
+
+import bpy
+import numpy as np
+import plotly.graph_objects as go
 
 # Set up logging
 logging.basicConfig(
@@ -27,9 +30,6 @@ if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 
-import plotly.graph_objects as go
-import numpy as np
-import random
 
 
 def _get_mesh_data(obj):

@@ -15,4 +15,6 @@ Jinja2
 wandb
 simple_slurm
 plotly>=5.0.0
-scikit-image>=0.21.0 
+scikit-image>=0.21.0
+isort
+autoflake 
