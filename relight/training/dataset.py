@@ -119,9 +119,9 @@ def main():
 
     # Create dataset
     dataset = RelightDataset(
-        data_dir="/home/dcor/orkozlovsky/repos/relight/data_v2/train",
+        data_dir="/home/dcor/orkozlovsky/repos/relight/data_v3/train",
         subset_size=5438,
-        image_size=256,
+        image_size=768,
         normalize_images=True
     )
     
@@ -152,7 +152,7 @@ def main():
     plt.figure(figsize=(10 * aspect_ratio, 10))
     plt.imshow(grid)
     plt.axis('off')
-    plt.savefig('/home/dcor/orkozlovsky/repos/relight/data_v2/trainset_5438_samples.png')
+    plt.savefig('/home/dcor/orkozlovsky/repos/relight/data_v3/trainset_5438_samples.png')
     plt.close()
 
 if __name__ == "__main__":

@@ -1,11 +1,14 @@
 import csv
+import json
 import logging
 import os
 from math import pi
+from pathlib import Path
 
 import bpy
 import numpy as np
 from mathutils import Vector
+from PIL import Image
 
 from relight.utils.blender_plotly_vis import plot_light_positions_with_scene
 from relight.utils.blender_utils import (
@@ -26,6 +29,31 @@ logging.basicConfig(
     force=True
 )
 logger = logging.getLogger(__name__)
+
+
+def save_config_to_json(config, output_dir):
+    """Save configuration arguments to JSON file."""
+    config_path = output_dir / "config.json"
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2, default=str)
+    logger.info(f"Configuration saved to {config_path}")
+
+
+def load_config_from_json(output_dir):
+    """Load configuration arguments from JSON file."""
+    config_path = output_dir / "config.json"
+    if not config_path.exists():
+        return None
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    logger.info(f"Configuration loaded from {config_path}")
+    return config
+
+
+def configs_match(config1, config2):
+    """Check if two configurations match."""
+    # Convert to strings for comparison to handle numpy arrays and other non-serializable types
+    return json.dumps(config1, default=str, sort_keys=True) == json.dumps(config2, default=str, sort_keys=True)
 
 
 def inside_mesh(x, y, z, mesh):
@@ -247,6 +275,46 @@ def write_light_positions_csv(csv_path, positions):
                 csvfile.flush()
 
 
+def load_light_positions_from_csv(csv_path):
+    """
+    Load light positions from CSV.
+    Returns: list of (index, x, y, z, name, powers)
+    """
+    positions = []
+    with open(csv_path, 'r', newline='') as csvfile:
+        csv_reader = csv.DictReader(csvfile)
+        current_pos = None
+        current_indexes = []
+        current_powers = []
+        
+        for row in csv_reader:
+            x, y, z = float(row['x']), float(row['y']), float(row['z'])
+            name = row['light_name']
+            power = float(row['power'])
+            index = int(row['index'])
+            
+            if current_pos is None or current_pos != (x, y, z, name):
+                # Save previous position if exists
+                if current_pos is not None:
+                    positions.append((current_indexes, current_pos[0], current_pos[1], current_pos[2], current_pos[3], current_powers))
+                
+                # Start new position
+                current_pos = (x, y, z, name)
+                current_indexes = [index]
+                current_powers = [power]
+            else:
+                # Same position, add to current
+                current_indexes.append(index)
+                current_powers.append(power)
+        
+        # Add the last position
+        if current_pos is not None:
+            positions.append((current_indexes, current_pos[0], current_pos[1], current_pos[2], current_pos[3], current_powers))
+    
+    logger.info(f"Loaded {len(positions)} positions from {csv_path}")
+    return positions
+
+
 def render_light_positions(positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, set_name, eps = 0, render=True):
     """
     Set light positions, render, and update vis_positions.
@@ -254,6 +322,10 @@ def render_light_positions(positions, cornell_center, cornell_faces, render_node
     set_name: e.g. 'train_XXX', 'val', etc.
     """
     logger.info(f"[render_light_positions] Rendering {len(positions)} positions for set '{set_name}' with eps={eps}")
+    
+    # Get the base path from render nodes for file existence checking
+    base_path = Path(render_nodes['render'].base_path)
+    
     for (indexes, x, y, z, name, powers) in positions:
         light_obj = bpy.data.objects.get(name)
         facing_point = get_facing_point((x, y, z), cornell_center, cornell_faces)
@@ -265,33 +337,166 @@ def render_light_positions(positions, cornell_center, cornell_faces, render_node
         for index, power in zip(indexes, powers):
             light_obj.data.energy = power
             pos_to_index[(x, y, z, name, power)] = index
-            render_nodes['render'].file_slots[0].path = f"{index:05d}_render_" 
-            render_nodes['diffdir'].file_slots[0].path = f"{index:05d}_diffdir_"
-            render_nodes['diffindir'].file_slots[0].path = f"{index:05d}_diffindir_"
+            
             if render:
-                bpy.ops.render.render()
-            logger.debug(f"[render_light_positions] Rendered index {index} for light {name} at ({x}, {y}, {z}) with power {power}")
+                try:
+                    validate_and_render_files(index, render_nodes, base_path)
+                    logger.debug(f"[render_light_positions] Successfully rendered/validated index {index} for light {name} at ({x}, {y}, {z}) with power {power}")
+                except RuntimeError as e:
+                    logger.error(f"[render_light_positions] Failed to render index {index} for light {name} at ({x}, {y}, {z}) with power {power}: {e}")
+                    raise
         light_obj.hide_render = True
         light_obj.hide_viewport = True
     logger.info(f"[render_light_positions] Finished rendering set '{set_name}'")
 
 
+def validate_and_render_files(index, render_nodes, base_path, max_retries=5):
+    """
+    Validate file sizes and render if necessary with retry logic.
+    
+    Args:
+        index: The index for the file names
+        render_nodes: Dictionary containing render nodes
+        base_path: Base path for the output files
+        max_retries: Maximum number of retry attempts
+        
+    Returns:
+        bool: True if files are valid after rendering, False otherwise
+        
+    Raises:
+        RuntimeError: If files are still invalid after max_retries attempts
+    """
+    # Expected file sizes in bytes
+    EXPECTED_SIZES = {
+        'render': 3152067,
+        'diffdir': 4202354
+    }
+    
+    def check_file_sizes():
+        """Check if files exist and have correct sizes."""
+        render_file = base_path / f"{index:05d}_render_0095.png"
+        diffdir_file = base_path / f"{index:05d}_diffdir_0095.png"
+        
+        if not render_file.exists() or not diffdir_file.exists():
+            return False
+        
+        logger.debug(f"[validate_and_render_files] Files exist for index {index}, checking sizes")
+        
+        try:
+            render_size = render_file.stat().st_size
+            diffdir_size = diffdir_file.stat().st_size
+            
+            if render_size != EXPECTED_SIZES['render']:
+                logger.debug(f"[validate_and_render_files] Render file size mismatch for index {index}: expected {EXPECTED_SIZES['render']}, got {render_size}")
+            if diffdir_size != EXPECTED_SIZES['diffdir']:
+                logger.debug(f"[validate_and_render_files] Diffdir file size mismatch for index {index}: expected {EXPECTED_SIZES['diffdir']}, got {diffdir_size}")
+                                
+            return (render_size == EXPECTED_SIZES['render'] and diffdir_size == EXPECTED_SIZES['diffdir'])
+        except OSError:
+            return False
+    
+    def check_image_validity():
+        """Check if images can be opened and converted to RGB."""
+        render_file = base_path / f"{index:05d}_render_0095.png"
+        diffdir_file = base_path / f"{index:05d}_diffdir_0095.png"
+        
+        try:
+            # Try to open and convert both images to RGB
+            Image.open(render_file).convert("RGB")
+            Image.open(diffdir_file).convert("RGB")
+            logger.debug(f"[validate_and_render_files] Images for index {index} are valid")
+            return True
+        except Exception as e:
+            logger.debug(f"[validate_and_render_files] Image validation failed for index {index}: {e}")
+            return False
+    
+    def render_files():
+        """Render the files."""
+        render_nodes['render'].file_slots[0].path = f"{index:05d}_render_"
+        render_nodes['diffdir'].file_slots[0].path = f"{index:05d}_diffdir_"
+        bpy.ops.render.render()
+        logger.debug(f"[validate_and_render_files] Rendered index {index}")
+    
+    # Check if files already exist and are valid
+    if check_file_sizes() and check_image_validity():
+        logger.debug(f"[validate_and_render_files] Files for index {index} already exist and are valid, skipping render")
+        return True
+    
+    # Try rendering with retry logic
+    for attempt in range(max_retries):
+        logger.debug(f"[validate_and_render_files] Attempt {attempt + 1}/{max_retries} for index {index}")
+        
+        # Render the files
+        render_files()
+        
+        # Check if files are now valid
+        if check_file_sizes() and check_image_validity():
+            logger.debug(f"[validate_and_render_files] Files for index {index} are valid after attempt {attempt + 1}")
+            return True
+        
+        logger.warning(f"[validate_and_render_files] Files for index {index} are invalid after attempt {attempt + 1}")
+    
+    # If we get here, all attempts failed
+    error_msg = f"Failed to generate valid files for index {index} after {max_retries} attempts"
+    logger.error(f"[validate_and_render_files] {error_msg}")
+    raise RuntimeError(error_msg)
+
+
 def generate_train_set(light_sources, N, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, train_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index, eps):
     logger.info(f"[generate_train_set] Generating train set with N={N}, eps={eps}")
+    
+    # 2. Check if train_csv_path exists
     train_positions = []
-    for light_cfg in light_sources:
-        light_obj = bpy.data.objects.get(light_cfg.name)
-        logger.debug(f"[generate_train_set] Generating grid positions for light '{light_cfg.name}'")
-        train_positions_cfg = generate_light_grid_positions(light_obj, N, light_cfg.mode, x_range, y_range, z_range, filter_valid_fn, eps, round_val, sampling_step=1)
-        positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in train_positions_cfg])
-        powers_arr = light_cfg.compute_powers_vectorized(positions_arr, cornell_center, light_obj)  # shape (N, M)
-        train_positions.extend([([len(powers)*index + i for i in range(len(powers))], pos[0], pos[1], pos[2], light_cfg.name, powers) for index, pos, powers in zip(range(len(train_positions), len(positions_arr) + len(train_positions)), positions_arr, powers_arr)])
-    N_actual = len(train_positions)
-    logger.info(f"[generate_train_set] Total train positions: {N_actual}")
-    train_csv_path = train_dir / f"light_positions_{N_actual}.csv"
-    write_light_positions_csv(train_csv_path, train_positions)
-    render_light_positions(train_positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, f"train_{N_actual}", eps, render=False)
-    logger.info(f"[generate_train_set] Train positions saved to {train_csv_path}")
+    N_actual = 0
+    
+    # Find the largest existing train CSV file
+    existing_csv_files = list(train_dir.glob("light_positions_*.csv"))
+    if existing_csv_files:
+        # Sort by the number in filename to find the largest
+        def extract_number(filename):
+            try:
+                return int(filename.stem.split('_')[-1])
+            except (ValueError, IndexError):
+                return 0
+        
+        largest_csv = max(existing_csv_files, key=extract_number)
+        N_actual = extract_number(largest_csv)
+        train_csv_path = largest_csv
+        
+        logger.info(f"[generate_train_set] Found existing train CSV: {train_csv_path} with {N_actual} positions")
+        
+        # 2.1 Load train_positions from existing CSV
+        train_positions = load_light_positions_from_csv(train_csv_path)
+        logger.info(f"[generate_train_set] Loaded {len(train_positions)} positions from existing CSV")
+    
+    # 2.2 Calculate train_positions if not loaded from CSV
+    if not train_positions:
+        logger.info(f"[generate_train_set] No existing CSV found, calculating new train positions")
+        for light_cfg in light_sources:
+            light_obj = bpy.data.objects.get(light_cfg.name)
+            logger.debug(f"[generate_train_set] Generating grid positions for light '{light_cfg.name}'")
+            train_positions_cfg = generate_light_grid_positions(light_obj, N, light_cfg.mode, x_range, y_range, z_range, filter_valid_fn, eps, round_val, sampling_step=1)
+            positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in train_positions_cfg])
+            powers_arr = light_cfg.compute_powers_vectorized(positions_arr, cornell_center, light_obj)  # shape (N, M)
+            train_positions.extend([([len(powers)*index + i for i in range(len(powers))], pos[0], pos[1], pos[2], light_cfg.name, powers) for index, pos, powers in zip(range(len(train_positions), len(positions_arr) + len(train_positions)), positions_arr, powers_arr)])
+        
+        N_actual = len(train_positions)
+        logger.info(f"[generate_train_set] Calculated {N_actual} new train positions")
+        
+        # Save to CSV
+        train_csv_path = train_dir / f"light_positions_{N_actual}.csv"
+        write_light_positions_csv(train_csv_path, train_positions)
+        logger.info(f"[generate_train_set] Train positions saved to {train_csv_path}")
+    
+    # 3. Load train_positions from CSV and continue to render_light_positions
+    # (This step is already done above, but we ensure we have the data)
+    if not train_positions:
+        logger.error("[generate_train_set] Failed to load or calculate train positions")
+        raise RuntimeError("No train positions available")
+    
+    logger.info(f"[generate_train_set] Proceeding with {len(train_positions)} train positions")
+    render_light_positions(train_positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, f"train_{N_actual}", eps)
+    logger.info(f"[generate_train_set] Train set generation complete with {N_actual} positions")
 
 
 def generate_subsets(light_sources, N, x_range, y_range, z_range, filter_valid_fn, train_dir, round_val, vis_positions, pos_to_vis_pos, eps):
@@ -322,18 +527,29 @@ def generate_subsets(light_sources, N, x_range, y_range, z_range, filter_valid_f
 
 def generate_val_set(light_sources, Y, x_range, y_range, z_range, filter_valid_fn, cornell_center, cornell_faces, render_nodes, val_dir, round_val, vis_positions, pos_to_vis_pos, pos_to_index, eps):
     logger.info(f"[generate_val_set] Generating validation set with Y={Y}, eps={eps}")
-    val_positions = []
-    for light_cfg in light_sources:
-        light_obj = bpy.data.objects.get(light_cfg.name)
-        logger.debug(f"[generate_val_set] Generating random positions for light '{light_cfg.name}'")
-        val_positions_cfg = generate_light_random_positions(light_obj, light_cfg.mode, Y, x_range, y_range, z_range, filter_valid_fn)
-        positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in val_positions_cfg])
-        powers_arr = light_cfg.compute_powers_vectorized(positions_arr, cornell_center, light_obj)
-        val_positions.extend([([len(powers)*idx + i for i in range(len(powers))], pos[0], pos[1], pos[2], light_cfg.name, powers) for idx, pos, powers in zip(range(len(val_positions), len(positions_arr) + len(val_positions)), positions_arr, powers_arr)])
+    
     val_csv_path = val_dir / "light_positions.csv"
-    write_light_positions_csv(val_csv_path, val_positions)
+    
+    # Check if validation CSV already exists
+    if val_csv_path.exists():
+        logger.info(f"[generate_val_set] Validation CSV already exists, loading from {val_csv_path}")
+        val_positions = load_light_positions_from_csv(val_csv_path)
+    else:
+        logger.info(f"[generate_val_set] No existing validation CSV found, calculating new validation positions")
+        val_positions = []
+        for light_cfg in light_sources:
+            light_obj = bpy.data.objects.get(light_cfg.name)
+            logger.debug(f"[generate_val_set] Generating random positions for light '{light_cfg.name}'")
+            val_positions_cfg = generate_light_random_positions(light_obj, light_cfg.mode, Y, x_range, y_range, z_range, filter_valid_fn)
+            positions_arr = np.array([(round(x, round_val), round(y, round_val), round(z, round_val)) for (x, y, z) in val_positions_cfg])
+            powers_arr = light_cfg.compute_powers_vectorized(positions_arr, cornell_center, light_obj)
+            val_positions.extend([([len(powers)*idx + i for i in range(len(powers))], pos[0], pos[1], pos[2], light_cfg.name, powers) for idx, pos, powers in zip(range(len(val_positions), len(positions_arr) + len(val_positions)), positions_arr, powers_arr)])
+        
+        write_light_positions_csv(val_csv_path, val_positions)
+        logger.info(f"[generate_val_set] Validation positions saved to {val_csv_path}")
+    
     render_light_positions(val_positions, cornell_center, cornell_faces, render_nodes, vis_positions, pos_to_vis_pos, pos_to_index, "val")
-    logger.info(f"[generate_val_set] Validation positions saved to {val_csv_path}")
+    logger.info(f"[generate_val_set] Validation set generation complete with {len(val_positions)} positions")
 
 
 def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_progress=True):
@@ -343,12 +559,47 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
     light_sources: list of LightSourceConfiguration
     output_dir: Path
     """
+    # Convert output_dir to Path if it's a string
+    output_dir = Path(output_dir)
+    
+    # Create current configuration
+    current_config = {
+            'N': N,
+            'Y': Y,
+            'light_sources': [{'name': ls.name, 'irradiances': ls.irradiances, 'mode': ls.mode, 'light_type': ls.light_type} for ls in light_sources],
+            'use_gpu': use_gpu,
+            'show_progress': show_progress
+        }
+    
+    save_config_to_json(current_config, output_dir)
+    
+    # 1. Check if output_dir exists and handle configuration
+    if output_dir.exists():
+        # Load existing configuration
+        existing_config = load_config_from_json(output_dir)
+        if existing_config is not None:
+            # Check if configurations match
+            if not configs_match(existing_config, current_config):
+                logger.error("Configuration mismatch detected!")
+                logger.error(f"Existing config: {existing_config}")
+                logger.error(f"Current config: {current_config}")
+                raise ValueError("Input arguments do not match the existing configuration in the output directory. Please use a different output directory or remove the existing one.")
+            else:
+                logger.info("Configuration matches existing setup. Proceeding with recovery.")
+    else:
+        # Create output directory
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save current configuration
+        save_config_to_json(current_config, output_dir)
+        logger.info("Created new output directory and saved configuration.")
+
     if use_gpu:
         setup_gpu_rendering()
 
     logger.info("Starting light dataset generation.")
-    bpy.context.scene.render.resolution_x = 512
-    bpy.context.scene.render.resolution_y = 512
+    bpy.context.scene.render.resolution_x = 1024
+    bpy.context.scene.render.resolution_y = 1024
 
     cornell_box = bpy.data.objects["cornell_box"]
     large_box = bpy.data.objects["large_box"]
@@ -357,7 +608,7 @@ def generate_light_dataset(N, Y, light_sources, output_dir, use_gpu=True, show_p
     render_nodes = {
         'render': bpy.data.scenes["Scene"].node_tree.nodes["render_png"],
         'diffdir': bpy.data.scenes["Scene"].node_tree.nodes["render_diffdir_png"],
-        'diffindir': bpy.data.scenes["Scene"].node_tree.nodes["render_diffindir_png"]
+        # 'diffindir': bpy.data.scenes["Scene"].node_tree.nodes["render_diffindir_png"]
     }
 
     # Check all light sources exist at the beginning and are of type 'LIGHT'

@@ -18,11 +18,11 @@ from typing import Any, Dict, Optional
 
 class ControlNetUnifiedTrainer(ControlNetTrainerBase):
     def __init__(self, config: ControlNetTrainConfig, logger: Any, device: torch.device) -> None:
-        logger.info(f"Loading vae from: {config.pretrained_model_name_or_path}")
+        logger.info(f"Loading vae (AutoencoderKL) from: {config.pretrained_model_name_or_path}")
         self.vae = AutoencoderKL.from_pretrained(
             config.pretrained_model_name_or_path, subfolder="vae", revision=config.revision, variant=config.variant
         )
-        logger.info(f"Loading unet from: {config.pretrained_model_name_or_path}")
+        logger.info(f"Loading unet (UNet2DConditionModel) from: {config.pretrained_model_name_or_path}")
         self.unet = UNet2DConditionModel.from_pretrained(
             config.pretrained_model_name_or_path, subfolder="unet", revision=config.revision, variant=config.variant
         )
@@ -32,8 +32,13 @@ class ControlNetUnifiedTrainer(ControlNetTrainerBase):
         else:
             logger.info("Initializing controlnet weights from unet.")
             self.controlnet = ControlNetModel.from_unet(self.unet)
-        logger.info(f"Loading noise scheduler from: {config.pretrained_model_name_or_path}")
-        self.noise_scheduler = DDPMScheduler.from_pretrained(config.pretrained_model_name_or_path, subfolder="scheduler")
+        logger.info(f"Loading noise scheduler (DDPMScheduler) from: {config.pretrained_model_name_or_path}")
+        self.noise_scheduler = DDPMScheduler.from_pretrained(
+            config.pretrained_model_name_or_path,
+            subfolder="scheduler",
+            rescale_betas_zero_snr=config.rescale_betas_zero_snr,
+            timestep_spacing=config.timestep_spacing,
+        )
         logger.info(f"Noise scheduler config: {self.noise_scheduler.config}")
         self.vae.requires_grad_(False)
         self.unet.requires_grad_(False)

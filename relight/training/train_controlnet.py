@@ -73,11 +73,6 @@ def main(config: ControlNetTrainConfig):
         project_config=accelerator_project_config,
     )
 
-    # Restrict logging to main process
-    if not accelerator.is_main_process:
-        logging.getLogger().setLevel(logging.WARNING)
-
-    logger.info("Starting main function with config: %s", config)
 
     # Disable AMP for MPS.
     if torch.backends.mps.is_available():
@@ -97,7 +92,10 @@ def main(config: ControlNetTrainConfig):
     else:
         transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
+        logging.getLogger().setLevel(logging.WARNING)
 
+    logger.info("Starting main function with config: %s", config)
+    
     # If passed along, set the training seed now.
     if config.seed is not None:
         logger.info("Setting random seed: %d", config.seed)
@@ -137,8 +135,6 @@ def main(config: ControlNetTrainConfig):
         logger.info("Using standard AdamW optimizer.")
         optimizer_class = torch.optim.AdamW
 
-    # Optimizer creation
-    logger.info("Creating optimizer.")
     optimizer = optimizer_class(
         params_to_optimize,
         lr=config.learning_rate,

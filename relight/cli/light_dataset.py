@@ -12,11 +12,6 @@ from pathlib import Path
 
 import numpy as np
 
-from relight.dataset.light_dataset import (
-    LightSourceConfiguration,
-    generate_light_dataset,
-)
-
 # Add relight source directory to PYTHONPATH
 repo_root = '/home/dcor/orkozlovsky/repos/relight/'
 os.environ['PYTHONPATH'] = repo_root + ':' + os.environ.get('PYTHONPATH', '')
@@ -29,6 +24,10 @@ if os.path.exists(site_packages):
     print(f"Adding {site_packages} to sys.path")
     sys.path.append(site_packages)
 
+from relight.dataset.light_dataset import (
+    LightSourceConfiguration,
+    generate_light_dataset,
+)
 
 def parse_args():
     """Parse command line arguments."""

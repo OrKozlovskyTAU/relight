@@ -2,7 +2,7 @@ from simple_slurm import Slurm
 import os
 
 # ------------------- USER CONFIGURATION -------------------
-SWEEP_ID = "orkozlovsky-tel-aviv-university/train-controlnet/ngda7yht"  # <-- Replace with your actual sweep id from `wandb sweep ...`
+SWEEP_ID = "orkozlovsky-tel-aviv-university/train-controlnet/r93imsie"  # <-- Replace with your actual sweep id from `wandb sweep ...`
 NUM_AGENTS = 4                   # Number of parallel agents/jobs to launch
 CONDA_ENV = "relight_blender"    # Your conda environment name
 PROJECT_DIR = "/home/dcor/orkozlovsky/repos/relight"  # Your project directory

@@ -187,14 +187,6 @@ def parse_args(input_args=None):
         action="store_true",
         help="Whether or not to upcast vae to fp32",
     )
-    
-    # Additional training configuration
-    parser.add_argument(
-        "--lab_color_match_logging",
-        type=lambda x: str(x).lower() == 'true',
-        default=False,
-        help="Enable LAB color matching for logging images during training and validation. Accepts True or False.",
-    )
     parser.add_argument(
         "--mixed_precision",
         type=str,
@@ -543,6 +535,26 @@ def parse_args(input_args=None):
         type=float,
         default=0.1,
         help="Factor for the zero-frequency extra noise added to latents during training (default: 0.1)",
+    )
+
+    parser.add_argument(
+        "--rescale_betas_zero_snr",
+        type=lambda x: str(x).lower() == 'true',
+        default=False,
+        help="If set, rescales betas for zero SNR training in the noise scheduler (DDPMScheduler).",
+    )
+    parser.add_argument(
+        "--timestep_spacing",
+        type=str,
+        default="linspace",
+        help="Timestep spacing strategy for the noise scheduler (e.g., 'linspace', 'leading', 'trailing').",
+    )
+
+    parser.add_argument(
+        "--guidance_rescale",
+        type=float,
+        default=0.0,
+        help="Guidance rescale factor for the pipeline (used in diffusion guidance, e.g., classifier-free guidance).",
     )
 
     if input_args is not None:

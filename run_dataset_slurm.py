@@ -6,7 +6,7 @@ slurm = Slurm(
     job_name='relight_light_dataset',
     output='slurm/%j.out',
     error='slurm/%j.err',
-    time='1:00:00',
+    time='24:00:00',
     gres='gpu:1',
     mem='24G',
     partition='killable',
@@ -30,7 +30,11 @@ os.environ['HF_HOME'] = '/home/dcor/orkozlovsky/.cache/huggingface'
 os.environ['PYTHONPATH'] = '/home/dcor/orkozlovsky/repos/relight/:' + os.environ.get('PYTHONPATH', '')
 
 # Build the command to run
-cmd = '/home/dcor/orkozlovsky/blender-3.6.5-linux-x64/blender mpi_cornel.blend --background --python relight/cli/light_dataset.py -- --N 16 --Y 10 --output-dir data_v2'
+cmd = '/home/dcor/orkozlovsky/blender-3.6.5-linux-x64/blender mpi_cornel.blend --background --python relight/cli/light_dataset.py -- --N 16 --Y 10 --output-dir data_v3'
+
+# Run the command in terminal
+# print(f"Running command: {cmd}")
+# os.system(cmd)
 
 # Submit the job
 job_id = slurm.sbatch(cmd)

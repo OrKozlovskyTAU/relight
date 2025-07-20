@@ -186,11 +186,8 @@ class ControlNetTrainConfig:
     # Example: "10,20,30"
     step_rules: Optional[str] = None
 
-    # If True, apply LAB color matching to generated images before logging (validation and training logs)
-    lab_color_match_logging: bool = False
-
     # If True, initialize config from wandb.config for sweep agent mode
-    wandb_sweep_agent: bool = False
+    wandb_sweep_agent: bool = True
 
     model_type: str = "sd15"  # or "sd3", "flux"
 
@@ -199,6 +196,15 @@ class ControlNetTrainConfig:
     validation_perceptual_improve_pct: float = 10.0
     # Minimum percent improvement required in MSE loss to consider as better 
     validation_mse_improve_pct: float = 1.0
+
+    # If True, rescales betas for zero SNR training in the noise scheduler.
+    rescale_betas_zero_snr: bool = False
+
+    # Timestep spacing strategy for the noise scheduler (e.g., 'linspace', 'leading', 'trailing').
+    timestep_spacing: str = "linspace"
+
+    # Guidance rescale factor for the pipeline (used in diffusion guidance, e.g., classifier-free guidance).
+    guidance_rescale: float = 0.0
 
     @staticmethod
     def from_args(args) -> 'ControlNetTrainConfig':

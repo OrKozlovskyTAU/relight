@@ -88,6 +88,7 @@ class ControlNetTrainerBase(ABC):
             controlnet=controlnet,
             torch_dtype=weight_dtype,
             safety_checker=None,
+            guidance_rescale=self.config.guidance_rescale,
             **pipeline_kwargs
         )
         pipeline = pipeline.to(accelerator.device)
