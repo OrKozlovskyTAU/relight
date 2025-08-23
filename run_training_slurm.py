@@ -77,7 +77,7 @@ MODEL_SETTINGS = {
 }
 
 # Select which model to use: "sd15" or "sd21"
-SELECTED_MODEL = "sd21"
+SELECTED_MODEL = "sd15"
 model_cfg = MODEL_SETTINGS[SELECTED_MODEL]
 
 # Unique output directory and slurm output/error files per job
@@ -98,8 +98,8 @@ relight/training/train_controlnet.py \
 --model_type="{model_cfg["model_type"]}" \
 --pretrained_model_name_or_path="{model_cfg["pretrained_model_name_or_path"]}" \
 --output_dir="{output_dir}" \
---train_data_dir="data_v3/train" \
---validation_data_dir="data_v3/val" \
+--train_data_dir="data_v2/train" \
+--validation_data_dir="data_v2/val" \
 --subset_size=5438 \
 --max_validation_samples=20 \
 --resolution={model_cfg["resolution"]} \
